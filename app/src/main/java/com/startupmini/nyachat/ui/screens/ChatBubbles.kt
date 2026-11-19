@@ -820,6 +820,7 @@ private fun FinancialBadge(
     // tetap bisa menjangkau badge kecil (termasuk uji gesture tap).
     val badgeClickModifier = if (onOpenTransaction != null) {
         Modifier
+            .testTag("financial_badge_${message.id}")
             .heightIn(min = 48.dp)
             .widthIn(min = 48.dp)
             .clickable(onClick = onOpenTransaction)
@@ -842,7 +843,6 @@ private fun FinancialBadge(
                 // A-M4: batas lebar badge supaya tidak mendorong/menabrak jam.
                 .widthIn(max = 180.dp)
                 .then(if (tagBrush != null) Modifier.background(tagBrush, RoundedCornerShape(8.dp)) else Modifier)
-                .testTag("financial_badge_${message.id}")
         ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),

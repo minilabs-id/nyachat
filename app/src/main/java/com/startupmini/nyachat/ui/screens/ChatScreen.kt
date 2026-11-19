@@ -421,28 +421,25 @@ fun ChatScreen(
     // jalur terdekat adalah FirestoreSyncManager.syncMessage (queue-aware,
     // otomatis di-retry saat online). Bisa dioverride via onRetrySend.
     val retrySend: (ChatMessage) -> Unit = { target ->
-        // B6: guard anti double-submit saat kirim ulang masih berjalan.
-        if (target.id in retryingIds) return@retrySend
-        // R2-B7: info "menunggu" ditampilkan SEGERA, indikator masuk
-        // RETRYING, lalu hasil baru dilaporkan setelah sync selesai.
-        retryingIds = retryingIds + target.id
-        showSnack(resendPendingLabel)
-        coroutineScope.launch {
-            val override = onRetrySend
-            if (override != null) {
-                // Override milik pemilik state bisa mengembalikan hasil nyata.
-                val ok = runCatching { override(target) }.isSuccess
-                if (ok) showSnack(resendSuccessLabel) else showSnack(resendPendingLabel)
-            } else {
-                // Review: FirestoreSyncManager.syncMessage() suspend Unit dan
-                // menelan error (enqueue/PERMISSION_DENIED) — runCatching.isSuccess
-                // SELALU true, jadi dulu muncul "berhasil" palsu. Jalur default
-                // HANYA bisa memastikan pesan masuk antrean; keberhasilan bilayer
-                // dibuktikan oleh receipt server, bukan oleh return value ini.
-                FirestoreSyncManager.syncMessage(target)
-                showSnack(resendPendingLabel)
+        // B6: guard anti double-submit (tanpa labeled return — lambda val tidak
+        // punya implicit label yang bisa dipakai return@).
+        if (target.id !in retryingIds) {
+            // R2-B7: info "menunggu" ditampilkan SEGERA, indikator RETRYING.
+            retryingIds = retryingIds + target.id
+            showSnack(resendPendingLabel)
+            coroutineScope.launch {
+                val override = onRetrySend
+                if (override != null) {
+                    val ok = runCatching { override(target) }.isSuccess
+                    if (ok) showSnack(resendSuccessLabel) else showSnack(resendPendingLabel)
+                } else {
+                    // syncMessage() suspend Unit & menelan error — sukses hanya
+                    // dibuktikan receipt server, bukan return value ini.
+                    FirestoreSyncManager.syncMessage(target)
+                    showSnack(resendPendingLabel)
+                }
+                retryingIds = retryingIds - target.id
             }
-            retryingIds = retryingIds - target.id
         }
     }
 

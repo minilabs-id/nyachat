@@ -1,8 +1,6 @@
 package com.startupmini.nyachat.ui.theme
 
 import android.app.Activity
-import androidx.compose.animation.core.LocalMotionDurationScale
-import androidx.compose.animation.core.MotionDurationScale
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -120,14 +118,10 @@ fun CoupleFinanceTheme(
             // Token warna semantik (income/expense/AI/dsb.) disediakan sekali di
             // sini — layar tidak perlu lagi mendeteksi mode gelap via luminance.
             CompositionLocalProvider(
-                LocalSemanticColors provides if (darkTheme) DarkSemanticColors else LightSemanticColors,
-                // Audit R2-H8: scale 0 membuat SELURUH animasi Compose/M3
-                // (sheet, dialog, dropdown, tooltip) snap saat "Hapus animasi"
-                // aktif — tidak hanya animasi yang memakai Motion.reducedMotion.
-                LocalMotionDurationScale provides object : MotionDurationScale {
-                    override val scaleFactor: Float =
-                        if (Motion.reducedMotion) 0f else 1f
-                }
+                LocalSemanticColors provides if (darkTheme) DarkSemanticColors else LightSemanticColors
+                // Catatan: LocalMotionDurationScale tidak tersedia di Compose
+                // yang dipakai repo; reduced-motion ditegakkan lewat helper
+                // Motion.* plus guard animateItem() di layar.
             ) {
                 content()
             }

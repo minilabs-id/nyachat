@@ -356,7 +356,14 @@ object E2eeSyncManager {
                 MARKER_OWNER_FIELD to owner,
                 KEY_EPOCH_FIELD to 0L
             )
-            val claimed = runCatching { markerRef().create(marker).await() }.isSuccess
+            // Firebase Android SDK tidak punya DocumentReference.create() —
+            // klaim atomik memakai transaksi: tulis HANYA bila marker belum ada.
+            val claimed = runCatching {
+                db().runTransaction { txn ->
+                    if (!txn.get(markerRef()).exists()) txn.set(markerRef(), marker)
+                }.await()
+                true
+            }.isSuccess
             if (!claimed) {
                 // Baca ULANG marker setelah create gagal — jangan asumsikan kita owner.
                 val snap = runCatching { markerRef().get().await() }.getOrNull()
@@ -626,7 +633,7 @@ object E2eeSyncManager {
                 val epoch = snap.getLong(KEY_EPOCH_FIELD) ?: 0L
                 // H2: rotasi kunci menaikkan keyEpoch. Semua perangkat HARUS
                 // mengambil ulang wrap & grup key, kalau tidak mantan anggota
-                (yang masih punya kunci lama) tetap bisa membaca pesan baru.
+                // (yang masih punya kunci lama) tetap bisa membaca pesan baru.
                 val rotated = lastSeenEpoch >= 0L && epoch != lastSeenEpoch
                 val firstSeen = !markerActive
                 markerActive = true

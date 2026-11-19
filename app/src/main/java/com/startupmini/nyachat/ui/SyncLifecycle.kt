@@ -88,16 +88,20 @@ fun SyncLifecycleGlue(
     LaunchedEffect(workspacePin) {
         val pin = workspacePin
         if (pin != null) {
+            // Audit M9: E2EE dimulai & status marker DISELESAIKAN lebih dulu, baru
+            // cloud sync diaktifkan. Sebelumnya cloud sync jalan lebih dulu sehingga
+            // ada jendela `active == false` yang dipetakan sendMode ke PLAINTEXT —
+            // pesan yang dikirim di jendela ini tersimpan sebagai legacy plaintext.
+            // start() sendiri sudah menetapkan familyId dari `pin`, jadi aman
+            // dipanggil lebih awal (onE2eeKeyReady tanpa listener tidak ada kerja).
+            E2eeSyncManager.start(context, pin, workspaceRole ?: Constants.Roles.MEMBER)
+            E2eeSyncManager.awaitActivationState()
             viewModel.startCloudSync(pin, workspaceRole ?: Constants.Roles.MEMBER)
             // r1.2.3 (P1): konteks untuk cache avatar anggota lain ke disk.
             MembershipManager.start(pin, workspaceRole ?: Constants.Roles.MEMBER, context)
             // r1.6.1 (audit pesan): konteks untuk mengunduh foto lampiran chat
             // dari Firebase Storage ke penyimpanan lokal penerima.
             FirestoreSyncManager.setAppContext(context)
-            // r1.7.0 (E2EE): siklus kunci workspace — keypair, public key ke member
-            // doc, aktivasi marker (owner), ambil & unwrap grup key, self-heal wrap.
-            // Dijalankan SETELAH cloud sync supaya onE2eeKeyReady punya familyId.
-            E2eeSyncManager.start(context, pin, workspaceRole ?: Constants.Roles.MEMBER)
             // Audit keanggotaan: pastikan nama di member doc Firestore mencerminkan
             // nama yang dipakai user (user lama yang belum pernah re-connect).
             // Hanya SEKALI (pref NAME_SYNCED) — jangan menulis Firestore di setiap
@@ -130,12 +134,18 @@ fun SyncLifecycleGlue(
     LaunchedEffect(Unit) {
         val lastCheck = appPrefs.getLong(Constants.Prefs.LAST_UPDATE_CHECK, 0L)
         if (System.currentTimeMillis() - lastCheck > 60 * 60 * 1000L) {
-            val release = GitHubUpdateChecker.checkLatest()
-            if (release != null) {
-                appPrefs.edit().putLong(Constants.Prefs.LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
-                if (GitHubUpdateChecker.isNewer(release.versionName, BuildConfig.VERSION_NAME)) {
-                    onUpdateAvailable(release)
+            // R2-H4: pakai hasil terstruktur agar error/offline tidak dianggap
+            // "up to date" & tidak menghabiskan cooldown 1 jam.
+            when (val result = GitHubUpdateChecker.checkLatestResult()) {
+                is GitHubUpdateChecker.UpdateCheckResult.Update -> {
+                    appPrefs.edit().putLong(Constants.Prefs.LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
+                    if (GitHubUpdateChecker.isNewer(result.release.versionName, BuildConfig.VERSION_NAME)) {
+                        onUpdateAvailable(result.release)
+                    }
                 }
+                GitHubUpdateChecker.UpdateCheckResult.UpToDate ->
+                    appPrefs.edit().putLong(Constants.Prefs.LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
+                GitHubUpdateChecker.UpdateCheckResult.Error -> Unit // cooldown tidak dipakai
             }
         }
     }

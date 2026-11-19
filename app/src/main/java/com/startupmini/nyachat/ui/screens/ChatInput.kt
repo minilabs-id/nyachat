@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
@@ -77,7 +78,6 @@ import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.local.ChatMessage
 import com.startupmini.nyachat.data.remote.BitmapCache
-import com.startupmini.nyachat.ui.theme.ExpenseRed
 import com.startupmini.nyachat.ui.theme.LocalSemanticColors
 import com.startupmini.nyachat.ui.theme.Motion
 import kotlinx.coroutines.Dispatchers
@@ -196,36 +196,44 @@ fun QuickSuggestionRow(
                     // (tanpa shadow). Background BARIS tetap transparan — jangan
                     // pernah panel full-width (regresi lama yang menutupi chat di
                     // atas keyboard).
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(
-                            alpha = if (semantic.isDark) CHIP_FILL_ALPHA_DARK else CHIP_FILL_ALPHA_LIGHT
-                        ),
-                        // Kesan kaca (2026-08-12): tepi tipis outlineVariant —
-                        // transparansi turun drastis (5-10%) jadi teks di belakang
-                        // tidak lagi mengganggu, border memberi definisi bentuk.
-                        border = BorderStroke(
-                            1.dp,
-                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = CHIP_GLASS_BORDER_ALPHA)
-                        ),
-                        // P2-4 (audit touch target): tinggi chip minimal 40dp — sebelumnya
-                        // hanya ~28dp, di bawah rekomendasi Android (48dp).
+                    // Audit UX M1: chip tetap ringkas secara visual, tetapi area
+                    // sentuhnya ≥48dp — klik dipasang di wrapper Box.
+                    Box(
                         modifier = Modifier
-                            .heightIn(min = 40.dp)
-                            .widthIn(max = 180.dp)
-                            .clickable { onSuggestionClicked(text) }
+                            .minimumInteractiveComponentSize()
+                            .clickable { onSuggestionClicked(text) },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier.padding(horizontal = 14.dp),
-                            contentAlignment = Alignment.Center
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(
+                                alpha = if (semantic.isDark) CHIP_FILL_ALPHA_DARK else CHIP_FILL_ALPHA_LIGHT
+                            ),
+                            // Kesan kaca (2026-08-12): tepi tipis outlineVariant —
+                            // transparansi turun drastis (5-10%) jadi teks di belakang
+                            // tidak lagi mengganggu, border memberi definisi bentuk.
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = CHIP_GLASS_BORDER_ALPHA)
+                            ),
+                            // P2-4 (audit touch target): tinggi chip minimal 40dp — sebelumnya
+                            // hanya ~28dp, di bawah rekomendasi Android (48dp).
+                            modifier = Modifier
+                                .heightIn(min = 40.dp)
+                                .widthIn(max = 180.dp)
                         ) {
-                            Text(
-                                text = text,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Box(
+                                modifier = Modifier.padding(horizontal = 14.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
@@ -280,7 +288,11 @@ private fun ReplyQuoteRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+        // Audit UX M1: ikon tetap 18dp/36dp secara visual, area sentuh ≥48dp.
+        IconButton(
+            onClick = onDismiss,
+            modifier = Modifier.size(36.dp).minimumInteractiveComponentSize()
+        ) {
             Icon(
                 imageVector = Icons.Rounded.Close,
                 contentDescription = stringResource(R.string.chat_reply_cancel),
@@ -333,7 +345,11 @@ fun ChatFilePreviewBar(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onRemove, modifier = Modifier.size(40.dp)) {
+                // Audit UX M1: area sentuh ≥48dp tanpa mengubah visual tombol.
+                IconButton(
+                    onClick = onRemove,
+                    modifier = Modifier.size(40.dp).minimumInteractiveComponentSize()
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = stringResource(R.string.chat_image_remove)
@@ -397,7 +413,11 @@ fun ChatImagePreviewBar(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onRemove, modifier = Modifier.size(40.dp)) {
+                // Audit UX M1: area sentuh ≥48dp tanpa mengubah visual tombol.
+                IconButton(
+                    onClick = onRemove,
+                    modifier = Modifier.size(40.dp).minimumInteractiveComponentSize()
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = stringResource(R.string.chat_image_remove)
@@ -579,6 +599,8 @@ fun ChatInputBar(
                     onClick = { onAskAi() },
                     modifier = Modifier
                         .size(40.dp)
+                        // Audit UX M1: visual 40dp, area sentuh ≥48dp.
+                        .minimumInteractiveComponentSize()
                         .testTag("ask_ai_button")
                 ) {
                     Icon(
@@ -715,7 +737,9 @@ fun ChatAttachmentSheet(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(ExpenseRed.copy(alpha = 0.15f)),
+                            // A-L1: token semantik mode-aware (bukan literal
+                            // merah hardcode yang kotor di dark mode).
+                            .background(semantic.expenseBg),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(

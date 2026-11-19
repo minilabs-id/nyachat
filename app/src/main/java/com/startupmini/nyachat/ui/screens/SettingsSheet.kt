@@ -1,6 +1,11 @@
 package com.startupmini.nyachat.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,10 +13,13 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -33,6 +41,7 @@ import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.TableChart
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,22 +50,36 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.startupmini.nyachat.BuildConfig
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
+import com.startupmini.nyachat.data.local.SecureStorage
+import com.startupmini.nyachat.ui.AppSnackbar
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -114,6 +137,11 @@ fun SettingsSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // F17: kunci pemulihan auto-backup dibaca dari SecureStorage saat dibutuhkan
+    // (bukan ditampilkan terus-menerus — ini rahasia pemulihan).
+    var showRecoveryKey by remember { mutableStateOf(false) }
+    var recoveryKey by remember { mutableStateOf<String?>(null) }
 
     // Audit motion (2026-08-12): tutup sheet WAJIB lewat sheetState.hide()
     // dulu (jendela turun ke bawah), baru onDismiss dipanggil — sebelum ini
@@ -159,6 +187,8 @@ fun SettingsSheet(
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         containerColor = MaterialTheme.colorScheme.surface,
+        // B-M20: handle bawaan dimatikan — custom 36x4dp handle di konten.
+        dragHandle = null,
         // Sheet berada di area konten (di atas NavigationBar) — padding navbar
         // bawaan sheet dinolkan agar tidak muncul celah.
         contentWindowInsets = { WindowInsets(0) },
@@ -166,13 +196,29 @@ fun SettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                // Audit menu Pengaturan (2026-08-12): tinggi dibatasi supaya sheet
-                // tidak penuh layar (sebelumnya konten ~2310px di layar 2400px —
-                // konsisten dengan ManageMembers yang heightIn max 560dp).
+                // B-M21: satu batas tinggi sheet 640dp (seragam dengan sheet lain).
                 .heightIn(max = 640.dp)
+                // B-M18: navbar inset manual (contentWindowInsets dinolkan).
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
+            // B-M20: drag handle 36x4dp — samakan dengan AddTransactionDialog &
+            // AiReportDialog (satu bahasa motion di kelima sheet).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+                )
+            }
             // Header
             Row(
                 modifier = Modifier
@@ -217,8 +263,18 @@ fun SettingsSheet(
                 title = stringResource(R.string.menu_chat_notifications),
                 subtitle = stringResource(R.string.menu_chat_notifications_desc),
                 onClick = onToggleChatNotifications,
+                // F15: SATU titik interaksi — Row toggleable (Role.Switch), Switch
+                // hanya tampilan. Mencegah double-toggle & duplikasi TalkBack.
+                toggleState = chatNotificationsEnabled,
                 trailing = {
-                    Switch(checked = chatNotificationsEnabled, onCheckedChange = { onToggleChatNotifications() })
+                    // C15: Row sudah toggleable(Role.Switch) — Switch murni
+                    // dekorasi. Hapus node semantics-nya agar TalkBack tidak
+                    // membaca dua kali.
+                    Switch(
+                        checked = chatNotificationsEnabled,
+                        onCheckedChange = null,
+                        modifier = Modifier.clearAndSetSemantics {}
+                    )
                 }
             )
 
@@ -280,11 +336,34 @@ fun SettingsSheet(
             SettingRow(
                 icon = Icons.Rounded.EnhancedEncryption,
                 title = stringResource(R.string.settings_backup_encrypt),
-                subtitle = stringResource(R.string.settings_backup_encrypt_desc),
+                // F17: subtitle menjelaskan auto-backup memakai kunci otomatis.
+                subtitle = stringResource(R.string.ux_auto_backup_subtitle),
                 onClick = onToggleBackupEncryption,
+                // F15: lihat catatan pada toggle notifikasi.
+                toggleState = isBackupEncrypted,
                 trailing = {
-                    Switch(checked = isBackupEncrypted, onCheckedChange = { onToggleBackupEncryption() })
+                    // C15: lihat catatan pada toggle notifikasi.
+                    Switch(
+                        checked = isBackupEncrypted,
+                        onCheckedChange = null,
+                        modifier = Modifier.clearAndSetSemantics {}
+                    )
                 }
+            )
+            SettingRow(
+                icon = Icons.Rounded.Key,
+                title = stringResource(R.string.ux_view_recovery_key),
+                onClick = {
+                    scope.launch {
+                        // Keystore crypto di IO via *Async (jangan di main thread).
+                        recoveryKey = SecureStorage.getSecretAsync(
+                            context,
+                            Constants.Prefs.BACKUP_AUTO_PASSPHRASE
+                        )
+                        showRecoveryKey = true
+                    }
+                },
+                chevron = true
             )
             SettingRow(
                 icon = Icons.Rounded.TableChart,
@@ -341,6 +420,62 @@ fun SettingsSheet(
             Spacer(modifier = Modifier.height(20.dp))
         }
     }
+
+    // B19: tombol Salin memakai ClipboardManager + ClipData berlabel, dengan
+    // konfirmasi lewat kanal umpan balik global AppSnackbar.
+    val copiedRecoveryLabel = stringResource(R.string.ux_copied_recovery)
+    fun copyRecoveryKey() {
+        val key = recoveryKey
+        if (key.isNullOrBlank()) return
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("kunci_pemulihan", key))
+        AppSnackbar.show(copiedRecoveryLabel)
+    }
+
+    // F17: tampilkan kunci pemulihan auto-backup dari SecureStorage bila tersedia.
+    // Baris "Lihat kunci pemulihan" membaca ulang dari Keystore setiap kali —
+    // dialog bisa ditutup lalu dibuka lagi (re-viewable).
+    if (showRecoveryKey) {
+        AlertDialog(
+            onDismissRequest = { showRecoveryKey = false },
+            title = { Text(stringResource(R.string.ux_view_recovery_key)) },
+            text = {
+                Column {
+                    Text(
+                        text = stringResource(R.string.ux_auto_backup_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = recoveryKey ?: "—",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        // B-M11: kunci pemulihan monospace panjang dibatasi
+                        // 3 baris + ellipsis (dialog tetap muat di 320dp).
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(12.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = ::copyRecoveryKey) {
+                    Text(stringResource(R.string.ux_copy))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRecoveryKey = false }) {
+                    Text(stringResource(R.string.action_ok))
+                }
+            }
+        )
+    }
 }
 
 /** Label "Backup terakhir: …" + status enkripsi untuk baris status (item 9).
@@ -389,7 +524,9 @@ private fun IdentityCard(
     val profileDesc = stringResource(R.string.profile_title)
     Surface(
         shape = RoundedCornerShape(Constants.Ui.CORNER_L.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        // B-M23: alpha dinaikkan 0.4 → 0.85 supaya kartu tidak nyaris tak
+        // terlihat di tema gelap (outline/surface kontras memadai).
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -398,7 +535,12 @@ private fun IdentityCard(
                     Modifier
                         .clip(RoundedCornerShape(Constants.Ui.CORNER_L.dp))
                         .clickable(onClick = onOpenProfile)
-                        .semantics { contentDescription = profileDesc }
+                        // B24: jangan timpa label dengan deskripsi generik —
+                        // bawa nama, peran, dan konteks halaman profil.
+                        .semantics {
+                            contentDescription = "$displayName, $roleLabel. $profileDesc"
+                            role = Role.Button
+                        }
                 } else Modifier
             )
     ) {
@@ -471,7 +613,10 @@ private fun SettingRow(
     // membuka sub-dialog/halaman menampilkan chevron (sebelumnya hanya kartu
     // profil yang punya, sehingga baris lain tidak terlihat bisa di-tap).
     chevron: Boolean = false,
-    trailing: (@Composable () -> Unit)? = null
+    trailing: (@Composable () -> Unit)? = null,
+    // F15: baris dengan Switch memakai SATU penangan (toggleable, Role.Switch),
+    // bukan Row.clickable + Switch.onCheckedChange yang dobel & duplikat TalkBack.
+    toggleState: Boolean? = null
 ) {
     val titleColor = when {
         !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
@@ -483,10 +628,20 @@ private fun SettingRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .then(
-                if (onClick != null && enabled) {
+                if (toggleState != null && onClick != null) {
+                    Modifier.toggleable(
+                        value = toggleState,
+                        role = Role.Switch,
+                        enabled = enabled,
+                        onValueChange = { onClick() }
+                    )
+                } else if (onClick != null && enabled) {
                     Modifier.clickable(onClick = onClick)
                 } else Modifier
             )
+            // C14: baris backup/restore saat busy tetap dibacakan TalkBack
+            // sebagai "dinonaktifkan" (bukan sekadar tidak merespons klik).
+            .then(if (onClick != null) Modifier.semantics { disabled = !enabled } else Modifier)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -501,13 +656,18 @@ private fun SettingRow(
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = titleColor
+                color = titleColor,
+                // B-M10: judul/subjudul dipangkas, tidak menimpa trailing/chevron.
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             subtitle?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }

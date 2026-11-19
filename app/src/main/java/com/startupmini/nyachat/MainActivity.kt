@@ -5,6 +5,7 @@ package com.startupmini.nyachat
 import com.startupmini.nyachat.Constants
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -23,6 +24,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -70,6 +72,8 @@ import com.startupmini.nyachat.data.backup.DriveBackupController
 import com.startupmini.nyachat.data.local.AvatarStore
 import com.startupmini.nyachat.data.local.FinancialTransaction
 import com.startupmini.nyachat.data.local.SecureStorage
+import com.startupmini.nyachat.data.remote.ChatMessageFirebaseService
+import com.startupmini.nyachat.ui.AppSnackbar
 import com.startupmini.nyachat.ui.MainAppDialogs
 import com.startupmini.nyachat.ui.MainDialogController
 import com.startupmini.nyachat.ui.MainOverlays
@@ -93,16 +97,37 @@ import com.startupmini.nyachat.ui.theme.Motion
 import com.startupmini.nyachat.ui.util.idrCurrencyFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
+    /** R2-H1: handoff notifikasi saat Activity sudah ada (singleTop → onNewIntent). */
+    private val notificationHandoffs = MutableSharedFlow<Intent>(extraBufferCapacity = 8)
+
+    /**
+     * R2-H1 — FIX DEAD TAP: dulu PendingIntent notifikasi dibuat tanpa extras yang
+     * bermakna dan requestCode konstan 0, jadi tap notifikasi tidak mengarahkan
+     * user ke chat/permintaan bergabung yang dimaksud. Service kini mengirim
+     * extras kontrak (lihat ChatMessageFirebaseService), Activity menerimanya
+     * baik saat cold-start (onCreate) maupun saat sudah berjalan (onNewIntent).
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        notificationHandoffs.tryEmit(intent)
+    }
+
     @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Extra saat cold-start dibaca dari intent awal; onNewIntent menutupi
+        // kasus Activity sudah alive (FLAG_ACTIVITY_SINGLE_TOP di service).
+        val launchIntent = intent
 
         // REDUCED MOTION (audit aksesibilitas 2026-08-12): hormati pengaturan
         // sistem "Hapus animasi" (ANIMATOR_DURATION_SCALE=0) — semua tween snap,
@@ -179,7 +204,13 @@ class MainActivity : ComponentActivity() {
                 // TASK-1.3 lanjutan: seluruh state dialog/overlay dipindah ke
                 // MainDialogController supaya MainActivity fokus wiring, bukan
                 // deklarasi belasan remember state.
-                val dialogs = remember { MainDialogController() }
+                // B1: Saver melestarikan dialog bermuatan input saat rotasi.
+                val dialogs = rememberSaveable(saver = MainDialogController.Saver) {
+                    MainDialogController()
+                }
+                // R2-H1: pesan yang dituju notifikasi chat disimpan di sini dulu
+                // (highlight/scroll ke pesan dikoordinasikan dengan layar chat).
+                var pendingHighlightCloudId by rememberSaveable { mutableStateOf<String?>(null) }
 
                 // BUG-2: draf chat DI-HOIST ke sini dengan rememberSaveable —
                 // AnimatedContent menghancurkan state ChatScreen saat pindah tab
@@ -195,6 +226,12 @@ class MainActivity : ComponentActivity() {
                 val rekapState = rememberSaveable(saver = RekapScreenState.Saver) {
                     RekapScreenState()
                 }
+
+                // M1: LazyListState Rekap DI-HOIST ke sini supaya instance yang
+                // sama dipakai ulang saat AnimatedContent pindah tab (posisi
+                // scroll tidak reset). Indeks pertama juga disimpan rekapState
+                // untuk bertahan saat rotasi/config change.
+                val rekapListState = rememberLazyListState()
 
 
                 // Non-secret dari appPrefs
@@ -269,6 +306,34 @@ class MainActivity : ComponentActivity() {
                             duration = if (onAction != null) SnackbarDuration.Long else SnackbarDuration.Short
                         )
                         if (result == SnackbarResult.ActionPerformed) onAction?.invoke()
+                    }
+                }
+
+                // R2-H5: SATU kanal umpan balik. Satu-satunya SnackbarHost ada di
+                // MainOverlays (host state di bawah); semua AppSnackbar.show() dari
+                // dialog/overlay lain mengalir ke host yang SAMA ini — tidak ada
+                // host kedua, tidak ada Toast.
+                LaunchedEffect(Unit) {
+                    AppSnackbar.events.collect { event ->
+                        val result = snackbarHostState.showSnackbar(
+                            message = event.message,
+                            actionLabel = event.actionLabel,
+                            duration = event.duration
+                        )
+                        if (result == SnackbarResult.ActionPerformed) event.onAction?.invoke()
+                    }
+                }
+
+                // B3: kegagalan tulis transaksi (insert/update/delete/undo) dari
+                // ViewModel masuk ke kanal yang SAMA — snackbar dengan aksi Coba lagi.
+                val retryLabel = stringResource(R.string.ux_retry)
+                LaunchedEffect(Unit) {
+                    viewModel.operationFailed.collect { message ->
+                        AppSnackbar.show(
+                            message = message,
+                            actionLabel = retryLabel,
+                            onAction = { viewModel.retryLastFailedOperation() }
+                        )
                     }
                 }
 
@@ -685,11 +750,18 @@ driveController.getAutoPassphrase = {
                 // penjelasan (dari kickedEvents foreground maupun resume A3).
                 val kickedMessage = stringResource(R.string.membership_kicked_message)
                 val performKickedCleanup = {
+                    val kickedPin = workspacePin
                     viewModel.stopCloudSync()
                     workspaceRole = Constants.Defaults.ROLE
                     workspacePin = null
                     dialogs.showSettingsSheet = false
                     dialogs.showProfileAccount = false
+                    // Audit: tutup SEMUA overlay terkait workspace lama. Nama field
+                    // disesuaikan dengan MainDialogController yang sebenarnya
+                    // (gate = connectGate, switch workspace = workspaceChoices).
+                    dialogs.connectGate = null
+                    dialogs.showManageMembers = false
+                    dialogs.workspaceChoices = emptyList()
                     // BUG-2 lanjutan: draf tidak boleh bocor ke workspace berikutnya.
                     chatDraft = ""
                     // Audit UI/UX Rekap (reviewer): filter Rekap di-reset juga saat
@@ -698,6 +770,8 @@ driveController.getAutoPassphrase = {
                     rekapState.selectedCategory = null
                     rekapState.selectedFilterTab = 0
                     scope.launch {
+                        viewModel.clearLocalData()
+                        kickedPin?.let { com.startupmini.nyachat.data.remote.E2eeSyncManager.clearLocalKeys(context, it) }
                         secureStorage.deleteSecretAsync(context, Constants.Prefs.WORKSPACE_PIN)
                     }
                     appPrefs.edit()
@@ -728,6 +802,7 @@ driveController.getAutoPassphrase = {
                 // PIN — akun tetap login Google, tapi tidak lagi terikat. Data lokal
                 // (Room + pending) dihapus; data cloud milik anggota lain tetap.
                 val performLeaveWorkspaceCleanup = {
+                    val leavingPin = workspacePin
                     viewModel.stopCloudSync()
                     workspaceRole = Constants.Defaults.ROLE
                     workspacePin = null
@@ -739,6 +814,7 @@ driveController.getAutoPassphrase = {
                     rekapState.selectedFilterTab = 0
                     scope.launch {
                         viewModel.clearLocalData()
+                        leavingPin?.let { com.startupmini.nyachat.data.remote.E2eeSyncManager.clearLocalKeys(context, it) }
                         secureStorage.deleteSecretAsync(context, Constants.Prefs.WORKSPACE_PIN)
                     }
                     appPrefs.edit().remove(Constants.Prefs.WORKSPACE_ROLE).apply()
@@ -904,6 +980,60 @@ driveController.getAutoPassphrase = {
                     syncMyName(name)
                 }
 
+                // R2-H1 — FIX DEAD TAP: konsumsi extras handoff notifikasi.
+                // Dipanggil untuk intent cold-start (.onCreate) DAN setiap
+                // onNewIntent saat Activity sudah berjalan (singleTop).
+                val handleNotificationHandoff: (Bundle?) -> Unit = handoff@{ extras ->
+                    if (extras == null) return@handoff
+                    val type = extras.getString(ChatMessageFirebaseService.EXTRA_TYPE)
+                    val familyId = extras.getString(ChatMessageFirebaseService.EXTRA_FAMILY_ID)
+                        ?.takeIf { it.isNotBlank() }
+                    val cloudId = extras.getString(ChatMessageFirebaseService.EXTRA_CLOUD_ID)
+                        ?.takeIf { it.isNotBlank() }
+                    // Kandidat PIN workspace dari extras. WAJIB terverifikasi masih
+                    // member sebelum dipakai — kalau tidak, jangan buka workspace
+                    // yang salah (mis. PIN lama setelah pindah/kick).
+                    val pinFromExtras =
+                        extras.getString(ChatMessageFirebaseService.EXTRA_WORKSPACE_PIN)
+                            ?.takeIf { it.isNotBlank() } ?: familyId
+                    scope.launch {
+                        val stillMember = pinFromExtras?.let { candidate ->
+                            com.startupmini.nyachat.data.remote.MembershipManager
+                                .checkMembership(candidate) ==
+                                com.startupmini.nyachat.data.remote.MembershipStatus.MEMBER
+                        } == true
+                        if (stillMember && pinFromExtras != null && workspacePin == null) {
+                            // PIN dari extras HANYA dipakai di sini, dan hanya
+                            // setelah cek keanggotaan sukses.
+                            val ws = com.startupmini.nyachat.data.remote.MembershipManager
+                                .discoverMyWorkspaces()?.firstOrNull { it.pin == pinFromExtras }
+                            if (ws != null) connectToWorkspace(ws.pin, ws.role, ws.name)
+                        }
+                        when (type) {
+                            ChatMessageFirebaseService.TYPE_CHAT -> {
+                                selectedTab = 0
+                                if (cloudId != null) pendingHighlightCloudId = cloudId
+                            }
+                            ChatMessageFirebaseService.TYPE_JOIN_REQUEST -> {
+                                dialogs.showManageMembers = true
+                            }
+                        }
+                    }
+                }
+                LaunchedEffect(Unit) {
+                    handleNotificationHandoff(launchIntent.extras)
+                    notificationHandoffs.collect { handoff ->
+                        handleNotificationHandoff(handoff.extras)
+                    }
+                }
+                // Highlight pesan hasil tap notifikasi hanya berlaku sesaat.
+                LaunchedEffect(pendingHighlightCloudId) {
+                    if (pendingHighlightCloudId != null) {
+                        delay(5_000)
+                        pendingHighlightCloudId = null
+                    }
+                }
+
                 Box(modifier = Modifier.fillMaxSize()) {
                     GlowingBackground()
 
@@ -1028,7 +1158,14 @@ driveController.getAutoPassphrase = {
                         // TopBar → BottomBar → Konten (lihat urutan subcompose di
                         // Scaffold.kt), sehingga Tab melompat ke navbar SEBELUM konten.
                         // Column manual → urutan fokus TopAppBar → konten → NavigationBar.
-                        Column(modifier = Modifier.fillMaxSize()) {
+                        // R2-H7: saat gate keanggotaan aktif, konten utama di
+                        // belakang scrim gate dihapus dari pohon semantics —
+                        // gate sudah `isDialog`, jadi fokus TalkBack hanya di gate.
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .semantics { if (dialogs.connectGate != null) invisibleToUser() }
+                        ) {
                             MainTopBar(
                                 onlineMemberNames = onlineMemberNames,
                                 totalMembers = members.size,
@@ -1105,7 +1242,8 @@ driveController.getAutoPassphrase = {
                                             onDeleteTransaction = rekapCallbacks::onDeleteTransaction,
                                             onEditTransaction = rekapCallbacks::onEditTransaction,
                                             syncStatus = syncStatus,
-                                            lastSyncedAtMillis = lastSyncedAt
+                                            lastSyncedAtMillis = lastSyncedAt,
+                                            listState = rekapListState
                                         )
                                     }
                                 }

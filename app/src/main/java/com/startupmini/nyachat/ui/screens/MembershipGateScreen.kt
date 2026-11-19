@@ -3,6 +3,8 @@ package com.startupmini.nyachat.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -38,6 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.isDialog
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -58,8 +65,12 @@ private val GateStateSaver = Saver<GateState, String>(
     restore = { GateState.valueOf(it) }
 )
 
-/** Batas total waktu menunggu persetujuan owner (anti-gantung selamanya, P2-10). */
-private const val GATE_MAX_WAIT_MS = 30 * 60 * 1000L
+/**
+ * Batas total waktu menunggu persetujuan owner (anti-gantung selamanya, P2-10).
+ * R2-B2: pakai konstanta yang SAMA dengan timeout listener di MembershipManager
+ * supaya waktu yang ditampilkan jujur (dulu gate 30 menit vs listener 10 menit).
+ */
+private const val GATE_MAX_WAIT_MS = MembershipManager.JOIN_DECISION_TIMEOUT_MS
 
 /**
  * Gate masuk workspace setelah PIN dimasukkan:
@@ -84,11 +95,23 @@ fun MembershipGateScreen(
     var error by rememberSaveable { mutableStateOf<GateError?>(null) }
     var requestedOnce by rememberSaveable { mutableStateOf(false) }
     var attempt by rememberSaveable { mutableIntStateOf(0) }
+    // F5: batas tunggu dihitung SEKALI saat gate pertama tampil dan dipertahankan
+    // lintas rotasi. Sebelumnya deadline dibuat ulang di dalam LaunchedEffect tiap
+    // retry → tombol "Coba Lagi" memberi waktu tunggu segar tanpa batas.
+    val gateDeadline by rememberSaveable {
+        mutableLongStateOf(System.currentTimeMillis() + GATE_MAX_WAIT_MS)
+    }
     val currentOnReady by rememberUpdatedState(onReady)
+    // Audit M5/F1: throttle server (RESOURCE_EXHAUSTED dari registerPinAttempt)
+    // jangan dilaporkan sebagai "gagal terhubung" — user akan menekan Coba Lagi
+    // dan justru memperpanjang lockout.
+    fun failureGateError(): GateError = if (
+        MembershipManager.lastFailure.value?.code == "RESOURCE_EXHAUSTED"
+    ) GateError.THROTTLED else GateError.FAILED
 
     LaunchedEffect(pin, role, attempt) {
-        // Batas total tunggu: setelah itu, error timeout (P2-10).
-        val deadline = System.currentTimeMillis() + GATE_MAX_WAIT_MS
+        // Batas total tunggu (F5): pakai deadline yang sama untuk semua retry.
+        val deadline = gateDeadline
         if (role == MembershipManager.ROLE_OWNER) {
             when (MembershipManager.ensureOwnerWorkspace(pin)) {
                 OwnerSetupResult.SUCCESS -> currentOnReady()
@@ -100,6 +123,53 @@ fun MembershipGateScreen(
             }
             return@LaunchedEffect
         }
+
+        /**
+         * R2-B2: timeout listener TIDAK serta-merta berarti permintaan hilang.
+         * Cek dokumen aslinya: bila masih PENDING, pasang ulang listener dan
+         * pertahankan requestedOnce = true — jangan jatuh ke SendJoinRequest yang
+         * mengirim permintaan dobel. Hanya bila dokumen sudah tidak ada kita
+         * kembalikan status terbaru (MEMBER / NOT_REQUESTED / FAILED) untuk
+         * ditangani [applyDecision].
+         */
+        suspend fun waitForDecisionWithRetry(): MembershipStatus {
+            while (true) {
+                val decision = MembershipManager.waitForJoinRequestDecision(pin)
+                if (decision != MembershipStatus.TIMED_OUT) return decision
+                val recheck = MembershipManager.checkMembership(pin)
+                if (recheck != MembershipStatus.PENDING) return recheck
+                // Masih menunggu persetujuan owner — request sudah pernah dikirim.
+                requestedOnce = true
+                state = GateState.WAITING
+            }
+        }
+
+        /** Tangani keputusan; return true bila alur gate harus berhenti. */
+        fun applyDecision(decision: MembershipStatus): Boolean {
+            when (decision) {
+                MembershipStatus.MEMBER -> {
+                    currentOnReady()
+                    return true
+                }
+                MembershipStatus.NOT_REQUESTED -> {
+                    error = GateError.REJECTED
+                    state = GateState.ERROR
+                    return true
+                }
+                MembershipStatus.FAILED -> {
+                    error = GateError.FAILED
+                    state = GateState.ERROR
+                    return true
+                }
+                MembershipStatus.TIMED_OUT -> {
+                    error = GateError.TIMEOUT
+                    state = GateState.ERROR
+                    return true
+                }
+                else -> return false // PENDING tidak dikembalikan waitForJoinRequestDecision
+            }
+        }
+
         // Anggota: cek → minta → tunggu persetujuan owner VIA LISTENER REALTIME
         // (bukan polling 3 detik). Minta hanya SATU KALI per sesi gate —
         // kalau ditolak (NOT_REQUESTED lagi), berhenti, jangan mengirim ulang berulang.
@@ -130,7 +200,7 @@ fun MembershipGateScreen(
                             return@LaunchedEffect
                         }
                         JoinRequestResult.FAILED -> {
-                            error = GateError.FAILED
+                            error = failureGateError()
                             state = GateState.ERROR
                             return@LaunchedEffect
                         }
@@ -140,43 +210,13 @@ fun MembershipGateScreen(
                     }
                     requestedOnce = true
                     state = GateState.WAITING
-                    // Listener realtime: tunggu owner setujui/tolak (dokumen joinRequest dihapus)
-                    val decision = MembershipManager.waitForJoinRequestDecision(pin)
-                    when (decision) {
-                        MembershipStatus.MEMBER -> {
-                            currentOnReady()
-                            return@LaunchedEffect
-                        }
-                        MembershipStatus.NOT_REQUESTED -> {
-                            // Ditolak owner
-                            error = GateError.REJECTED
-                            state = GateState.ERROR
-                            return@LaunchedEffect
-                        }
-                        MembershipStatus.FAILED -> {
-                            error = GateError.FAILED
-                            state = GateState.ERROR
-                            return@LaunchedEffect
-                        }
-                        MembershipStatus.TIMED_OUT -> {
-                            // Owner belum menyetujui sampai batas waktu — beri tahu user
-                            // bahwa itu TIMEOUT, bukan error jaringan.
-                            error = GateError.TIMEOUT
-                            state = GateState.ERROR
-                            return@LaunchedEffect
-                        }
-                        else -> {
-                            // Seharusnya tidak sampai sini (PENDING tidak dikembalikan
-                            // oleh waitForJoinRequestDecision), tapi fallback ke cek ulang
-                            // manual kalau perlu.
-                            delay(3_000)
-                        }
-                    }
+                    if (applyDecision(waitForDecisionWithRetry())) return@LaunchedEffect
                 }
                 GateStep.WaitForApproval -> {
                     state = GateState.WAITING
-                    // Fallback: jika listener di atas tidak jalan (mis. race condition),
-                    // tetap polling manual.
+                    // Permintaan sudah ada → pasang ulang listener, JANGAN kirim ulang.
+                    if (applyDecision(waitForDecisionWithRetry())) return@LaunchedEffect
+                    // Fallback: bila listener tidak menghasilkan keputusan, cek lagi.
                     delay(3_000)
                 }
             }
@@ -189,13 +229,19 @@ fun MembershipGateScreen(
         GateError.NOT_FOUND -> R.string.membership_error_not_found
         GateError.REJECTED -> R.string.membership_error_rejected
         GateError.TIMEOUT -> R.string.membership_error_timeout
+        GateError.THROTTLED -> R.string.membership_error_throttled
         else -> R.string.membership_error_failed
     }
 
+    // R2-H7: gate adalah dialog modal — beri tahu TalkBack bahwa ini dialog agar
+    // fokus tidak "keluar" ke konten di belakang. Menyembunyikan background UI
+    // (Modifier.semantics { invisibleToUser() }) dilakukan MainOverlays yang
+    // memasang gate di atas seluruh konten aplikasi (file lain, bukan milik kita).
     Box(
         modifier = Modifier
             .fillMaxSize()
             .imePadding()
+            .semantics { isDialog = true }
     ) {
         // F2 (audit focus order): gate dulu tidak punya background → layar login di
         // belakangnya masih TERLIHAT & bisa di-tap saat menunggu persetujuan owner
@@ -216,11 +262,22 @@ fun MembershipGateScreen(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier
                 .align(Alignment.Center)
+                // B-M13: gate bisa melebihi tinggi layar di landscape /
+                // fontScale besar — izinkan scroll, Center tetap dipertahankan.
+                .verticalScroll(rememberScrollState())
                 .padding(28.dp)
         ) {
             when (state) {
                 GateState.CHECKING -> {
-                    CircularProgressIndicator(modifier = Modifier.size(44.dp))
+                    // B14: indikator butuh label untuk pembaca layar.
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .semantics {
+                                contentDescription = stringResource(R.string.ux_status_checking)
+                                stateDescription = stringResource(R.string.ux_status_checking)
+                            }
+                    )
                     Spacer(modifier = Modifier.height(20.dp))
                     Text(
                         text = stringResource(R.string.membership_checking),
@@ -252,6 +309,16 @@ fun MembershipGateScreen(
                     Text(
                         text = stringResource(R.string.membership_waiting_pin, pin),
                         fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // R2-B2: nyatakan keterbatasan nyata — gate tidak bisa
+                    // menyetujui saat aplikasi tertutup.
+                    Text(
+                        text = stringResource(R.string.ux_gate_online_note),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
                         textAlign = TextAlign.Center,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -295,12 +362,20 @@ fun MembershipGateScreen(
             // PinAttemptLimiter di input PIN).
             if (state == GateState.ERROR &&
                 error != GateError.REJECTED &&
-                error != GateError.PIN_OWNED
+                error != GateError.PIN_OWNED &&
+                error != GateError.OWNED_ELSEWHERE &&
+                error != GateError.THROTTLED
             ) {
                 Button(
                     onClick = {
+                        // R2-B2: TIMEOUT terminal hanya terjadi bila dokumen request
+                        // sudah hilang (waitForDecisionWithRetry memastikan itu) →
+                        // aman mengirim ulang. Error lain bisa saja request masih ada
+                        // → pertahankan requestedOnce supaya loop PASANG ULANG listener,
+                        // bukan mengirim permintaan dobel.
+                        val wasTimeout = error == GateError.TIMEOUT
                         error = null
-                        requestedOnce = false // ulangi dari awal (izinkan kirim ulang)
+                        if (wasTimeout) requestedOnce = false
                         state = GateState.CHECKING
                         attempt++
                     },

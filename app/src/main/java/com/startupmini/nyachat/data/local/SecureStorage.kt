@@ -22,6 +22,15 @@ import javax.crypto.spec.GCMParameterSpec
  * - Data disimpan sebagai `Base64(IV || ciphertext)` di SharedPreferences biasa.
  * - Non-secret prefs (dark mode, role, name, timestamps) pindah ke SharedPreferences
  *   biasa tanpa enkripsi — hanya 3 field (2 API key + PIN) yang terenkripsi.
+ *
+ * L2: charset UTF-8 dipakai eksplisit (default platform bisa berbeda antar
+ * perangkat) dan semua ByteArray antara di-zero di `finally`.
+ *
+ * PENTING (kompatibilitas): JANGAN pernah mengubah [KEYSTORE_ALIAS] — mengganti
+ * alias membuat semua secret lama tak bisa dibaca (master key-nya hidup di
+ * Keystore, bukan di SharedPreferences). `setUserAuthenticationRequired(false)` juga
+ * dipertahankan apa adanya: mengaktifkannya akan mengubah perilaku unlock &
+ * bisa membuat secret lama gagal dibaca di perangkat tanpa biometrik.
  */
 object SecureStorage {
 
@@ -66,20 +75,31 @@ object SecureStorage {
             // Null/empty → hapus
             return deleteSecret(context, key)
         }
+        var plaintext: ByteArray? = null
+        var ciphertext: ByteArray? = null
+        var combined: ByteArray? = null
         return try {
             val masterKey = ensureMasterKey(context)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, masterKey)
             val iv = cipher.iv // 12 bytes untuk GCM
-            val ciphertext = cipher.doFinal(value.toByteArray())
+            val plainBytes = value.toByteArray(Charsets.UTF_8)
+            plaintext = plainBytes
+            val cipherBytes = cipher.doFinal(plainBytes)
+            ciphertext = cipherBytes
             // Gabung IV + ciphertext → base64
-            val combined = iv + ciphertext
-            val encoded = Base64.encodeToString(combined, Base64.NO_WRAP)
+            val combinedBytes = iv + cipherBytes
+            combined = combinedBytes
+            val encoded = Base64.encodeToString(combinedBytes, Base64.NO_WRAP)
             getPrefs(context).edit().putString(KEY_PREFIX + key, encoded).apply()
             true
         } catch (e: Exception) {
             android.util.Log.w("SecureStorage", "putSecret gagal: ${e.message}")
             false
+        } finally {
+            plaintext?.fill(0)
+            ciphertext?.fill(0)
+            combined?.fill(0)
         }
     }
 
@@ -91,19 +111,32 @@ object SecureStorage {
     fun getSecret(context: Context, key: String): String? {
         val encoded = getPrefs(context).getString(KEY_PREFIX + key, null)
             ?: return null
+        var combined: ByteArray? = null
+        var iv: ByteArray? = null
+        var ciphertext: ByteArray? = null
+        var plaintext: ByteArray? = null
         return try {
             val masterKey = ensureMasterKey(context)
-            val combined = Base64.decode(encoded, Base64.NO_WRAP)
+            val combinedBytes = Base64.decode(encoded, Base64.NO_WRAP)
+            combined = combinedBytes
             // IV = 12 byte pertama
-            val iv = combined.copyOfRange(0, 12)
-            val ciphertext = combined.copyOfRange(12, combined.size)
+            val ivBytes = combinedBytes.copyOfRange(0, 12)
+            iv = ivBytes
+            val cipherBytes = combinedBytes.copyOfRange(12, combinedBytes.size)
+            ciphertext = cipherBytes
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(128, iv))
-            val plaintext = cipher.doFinal(ciphertext)
-            String(plaintext)
+            cipher.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(128, ivBytes))
+            val plainBytes = cipher.doFinal(cipherBytes)
+            plaintext = plainBytes
+            String(plainBytes, Charsets.UTF_8)
         } catch (e: Exception) {
             android.util.Log.w("SecureStorage", "getSecret gagal: ${e.message}")
             null
+        } finally {
+            combined?.fill(0)
+            iv?.fill(0)
+            ciphertext?.fill(0)
+            plaintext?.fill(0)
         }
     }
 

@@ -1,6 +1,7 @@
 package com.startupmini.nyachat.ui.screens
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.PieChart
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.PieChart
@@ -59,8 +60,9 @@ fun MainNavigationBar(
                 onTabSelected(1)
             },
             icon = {
+                // L9: samakan pola Chat — filled saat aktif, outline saat tidak.
                 Icon(
-                    imageVector = Icons.Rounded.PieChart,
+                    imageVector = if (selectedTab == 1) Icons.Rounded.PieChart else Icons.Outlined.PieChart,
                     contentDescription = stringResource(R.string.tab_rekap_desc)
                 )
             },

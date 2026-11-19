@@ -246,6 +246,86 @@
     <string name="chat_info_nobody">—</string>
     <!-- r1.7.1 (anti-degradasi #2): E2EE aktif tapi kunci lokal belum siap. -->
     <string name="chat_e2ee_preparing">Mempersiapkan enkripsi… pesan baru akan terkirim setelah siap</string>
+    <!-- Audit M9: status E2EE belum terbaca saat startup — kirim ditunda (BLOCK). -->
+    <string name="chat_e2ee_checking">Memeriksa status enkripsi workspace…</string>
+
+    <!-- ===================== Audit UI/UX (perbaikan) ===================== -->
+    <!-- Rekap -->
+    <string name="ux_no_filter_results">Tidak ada hasil untuk filter ini</string>
+    <string name="ux_clear_filter">Hapus filter</string>
+    <string name="ux_transaction_date">Tanggal transaksi</string>
+    <string name="ux_pick_date">Pilih tanggal</string>
+    <string name="ux_ai_offline_notice">Mode AI sedang offline — laporan ini dihitung dari data lokal.</string>
+    <string name="ux_amount_hint">Isi keterangan dan nominal lebih dari 0</string>
+    <!-- Chat -->
+    <string name="ux_send_failed">Gagal terkirim</string>
+    <string name="ux_retry_send">Kirim ulang</string>
+    <string name="ux_attachment_save_failed">Gagal menyimpan lampiran. Periksa ruang penyimpanan lalu coba lagi.</string>
+    <string name="ux_image_load_failed">Gagal memuat foto</string>
+    <string name="ux_retry">Coba lagi</string>
+    <string name="ux_image_caption_placeholder">Foto tanpa keterangan</string>
+    <string name="ux_ai_thinking_empty">Menyiapkan jawaban AI…</string>
+    <string name="ux_copied">Disalin</string>
+    <string name="ux_zoom_in">Perbesar</string>
+    <string name="ux_zoom_out">Perkecil</string>
+    <!-- Membership & settings -->
+    <string name="ux_pin_length_helper">PIN terdiri dari 8 digit angka (PIN 6 digit lama tetap diterima)</string>
+    <string name="ux_pin_progress">%1$d/8 digit</string>
+    <string name="ux_pin_paste_invalid">PIN dipotong menjadi 8 digit pertama</string>
+    <string name="ux_approve_success">Permintaan disetujui</string>
+    <string name="ux_approve_failed">Gagal menyetujui, coba lagi</string>
+    <string name="ux_reject_confirm_title">Tolak permintaan?</string>
+    <string name="ux_reject_confirm_body">Pemohon harus mengirim ulang permintaan jika ditolak.</string>
+    <string name="ux_reject_success">Permintaan ditolak</string>
+    <string name="ux_member_action_failed">Aksi gagal. Coba lagi.</string>
+    <string name="ux_member_removed">Anggota dikeluarkan</string>
+    <string name="ux_member_role_updated">Peran anggota diperbarui</string>
+    <string name="ux_member_actions_for">Aksi untuk %1$s</string>
+    <string name="ux_api_key_saved">Kunci API tersimpan</string>
+    <string name="ux_api_key_invalid">Kunci API tampaknya tidak valid</string>
+    <string name="ux_api_key_reveal">Tampilkan kunci</string>
+    <string name="ux_api_key_hide">Sembunyikan kunci</string>
+    <string name="ux_passphrase_confirm">Ulangi passphrase</string>
+    <string name="ux_passphrase_mismatch">Passphrase tidak cocok</string>
+    <string name="ux_passphrase_min">Minimal 8 karakter</string>
+    <string name="ux_auto_backup_subtitle">Auto-backup memakai kunci otomatis perangkat ini. Simpan kunci pemulihan untuk restore di perangkat lain.</string>
+    <string name="ux_view_recovery_key">Lihat kunci pemulihan</string>
+    <string name="ux_cancel_restore_title">Batalkan restore?</string>
+    <string name="ux_cancel_restore_body">Data saat ini bisa tidak lengkap jika restore dihentikan.</string>
+
+    <!-- ===================== Audit UX putaran 2 ===================== -->
+    <string name="ux_upgrade_contact">Upgrade belum tersedia. Hubungi admin workspace untuk mengaktifkan paket Pro.</string>
+    <string name="ux_update_check_failed">Gagal memeriksa update. Periksa koneksi internet lalu coba lagi.</string>
+    <string name="ux_retry_check">Coba lagi</string>
+    <string name="ux_api_key_save_failed">Gagal menyimpan kunci API. Periksa ruang penyimpanan lalu coba lagi.</string>
+    <string name="ux_bubble_pending">Menunggu pengiriman</string>
+    <string name="ux_bubble_read_by">Dibaca oleh %1$d dari %2$d anggota</string>
+    <string name="ux_bubble_ai_processing">AI sedang memproses pesan ini</string>
+    <string name="ux_bubble_open_transaction">Buka transaksi</string>
+    <string name="ux_clearing_data">Menghapus data…</string>
+    <string name="ux_clear_data_success">Data berhasil dihapus</string>
+    <string name="ux_clear_data_failed">Gagal menghapus data. Coba lagi.</string>
+    <string name="ux_status_checking">Memeriksa…</string>
+    <string name="ux_save_failed">Gagal menyimpan. Coba lagi.</string>
+    <string name="ux_workspace_renamed">Nama workspace diperbarui</string>
+    <string name="ux_label_updated">Label anggota diperbarui</string>
+    <string name="ux_resend_success">Pesan dikirim ulang</string>
+    <string name="ux_resend_pending">Masih menunggu jaringan, pesan akan dikirim otomatis</string>
+    <string name="ux_expand_description">Lihat seluruh keterangan</string>
+    <string name="ux_desc_expanded">Terbuka</string>
+    <string name="ux_desc_collapsed">Terpotong</string>
+    <string name="ux_notif_settings_note">Termasuk notifikasi permintaan &amp; keputusan bergabung</string>
+    <string name="ux_gate_online_note">Persetujuan otomatis hanya berjalan saat aplikasi terbuka.</string>
+    <string name="ux_copy">Salin</string>
+    <string name="ux_copied_recovery">Kunci pemulihan tersalin</string>
+    <string name="ux_update_error_title">Gagal Update</string>
+    <string name="ux_update_check_title">Periksa Update</string>
+    <string name="ux_update_verify_failed">Update tidak dapat diverifikasi. Perbarui aplikasi dari Play Store atau hubungi dukungan.</string>
+    <string name="ux_cancel_restore_confirm">Batalkan restore</string>
+    <string name="ux_continue_restore">Lanjutkan restore</string>
+    <string name="ux_currency_prefix">Rp</string>
+    <string name="ux_list_separator">%1$s · %2$s</string>
+    <string name="backup_time_unknown">Waktu tidak diketahui</string>
     <string name="chat_reply_label">Membalas %1$s</string>
     <string name="chat_reply_cancel">Batalkan balasan</string>
     <string name="chat_send_pdf">Kirim PDF / Dokumen</string>
@@ -331,6 +411,7 @@
     <string name="membership_error_pin_owned">PIN ini sudah dimiliki oleh orang lain di akun ini. Periksa kembali PIN atau minta dibuatkan workspace baru.</string>
     <string name="membership_error_not_found">PIN tidak ditemukan. Pastikan PIN yang dimasukkan benar dan workspace sudah dibuat.</string>
     <string name="membership_error_failed">Gagal terhubung ke server. Periksa koneksi internet lalu coba lagi.</string>
+    <string name="membership_error_throttled">Terlalu banyak percobaan PIN. Tunggu beberapa menit sebelum mencoba lagi.</string>
     <string name="membership_error_rejected">Permintaan bergabung kamu tidak disetujui oleh pemilik workspace.</string>
     <string name="membership_error_timeout">Waktu tunggu persetujuan pemilik habis. Coba lagi nanti.</string>
     <string name="membership_retry">Coba Lagi</string>
@@ -404,6 +485,8 @@
     <string name="plan_upgrade_body">Paket Gratis maksimal %1$d anggota. Upgrade ke Pro untuk menambah hingga %2$d anggota.</string>
     <string name="plan_upgrade_now">Upgrade Sekarang</string>
     <string name="plan_upgrade_later">Nanti Saja</string>
+    <!-- Audit H3: plan diubah server-authoritative;upgrade ditolak bila belum ada entitlement. -->
+    <string name="plan_upgrade_failed">Upgrade belum tersedia. Pastikan langganan Pro aktif pada akun Google kamu, lalu coba lagi.</string>
     <!-- r1.6.0: notifikasi keanggotaan (channel, permintaan bergabung, keputusan). -->
     <string name="notif_membership_channel_name">Aktivitas workspace</string>
     <string name="notif_membership_channel_desc">Permintaan bergabung &amp; keputusan keanggotaan</string>

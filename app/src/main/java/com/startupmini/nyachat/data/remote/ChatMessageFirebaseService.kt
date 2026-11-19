@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 /**
  * FASE 3 item 3.7 — notifikasi chat real-time (\"seperti WhatsApp\"):
@@ -49,18 +50,28 @@ class ChatMessageFirebaseService : FirebaseMessagingService() {
 
         when (data[KEY_TYPE]) {
             KEY_TYPE_JOIN_REQUEST -> {
-                val name = data[KEY_REQUESTER_NAME]?.takeIf { it.isNotBlank() }
-                    ?: getString(R.string.sender_anggota)
                 val familyName = data[KEY_FAMILY_NAME]?.takeIf { it.isNotBlank() }
                     ?: getString(R.string.topbar_title)
-                postNotification(
-                    channelId = CHANNEL_ID_MEMBERSHIP,
-                    // ID per-pemohon: dua permintaan dari orang berbeda tidak
-                    // saling menimpa (audit r1.6.0).
-                    notificationId = membershipNotificationId(data[KEY_REQUESTER_UID]),
-                    title = getString(R.string.notif_join_request_title),
-                    text = getString(R.string.notif_join_request_body, name, familyName)
-                )
+                val requesterUid = data[KEY_REQUESTER_UID]
+                // Audit L3: nama pemohon TIDAK dikirim lewat FCM. Pemohon belum
+                // menjadi anggota (tidak ada member doc), jadi nama di-resolve
+                // dari joinRequests/{requesterUid} yang boleh dibaca owner.
+                ioScope.launch {
+                    val name = data[KEY_REQUESTER_NAME]?.takeIf { it.isNotBlank() }
+                        ?: resolveRequesterName(data[EXTRA_FAMILY_ID], requesterUid)
+                    postNotification(
+                        channelId = CHANNEL_ID_MEMBERSHIP,
+                        // ID per-pemohon: dua permintaan dari orang berbeda tidak
+                        // saling menimpa (audit r1.6.0).
+                        notificationId = membershipNotificationId(requesterUid),
+                        title = getString(R.string.notif_join_request_title),
+                        text = getString(R.string.notif_join_request_body, name, familyName),
+                        // R2-H1: bawa konteks agar tap langsung membuka Kelola Anggota.
+                        type = TYPE_JOIN_REQUEST,
+                        familyId = data[EXTRA_FAMILY_ID],
+                        requesterUid = requesterUid
+                    )
+                }
             }
             KEY_TYPE_JOIN_DECISION -> {
                 val approved = data[KEY_APPROVED] == "1"
@@ -75,48 +86,89 @@ class ChatMessageFirebaseService : FirebaseMessagingService() {
                     channelId = CHANNEL_ID_MEMBERSHIP,
                     notificationId = membershipNotificationId(data[KEY_REQUESTER_UID]),
                     title = getString(R.string.notif_join_decision_title),
-                    text = text
+                    text = text,
+                    type = TYPE_JOIN_REQUEST,
+                    familyId = data[EXTRA_FAMILY_ID],
+                    requesterUid = data[KEY_REQUESTER_UID]
                 )
             }
             else -> {
-                val sender = data["sender"]?.takeIf { it.isNotBlank() } ?: return
-                val body = data["body"]?.takeIf { it.isNotBlank() }
-                    ?: getString(R.string.chat_notif_default_body)
-                val cloudId = data["cloudId"] ?: ""
-
-                // Pesan dari workspace perangkat ini (diri sendiri) → jangan notif.
-                // r1.6.1 (audit pesan): skip presisi per-UID (payload senderUid
-                // dari cloud function). Fallback nama untuk payload lama (pra
-                // r1.6.1) yang belum membawa uid — nama bisa ambigu (dua orang
-                // bernama sama), uid tidak pernah.
+                // Audit L3: payload FCM tidak lagi membawa NAMA pengirim (metadata
+                // bocor ke Google). Yang dikirim cloud hanya senderUid + cloudId;
+                // nama di-resolve lokal dari member doc Firestore.
                 val senderUid = data["senderUid"]?.takeIf { it.isNotBlank() }
                 val myUid = FirebaseAuth.getInstance().currentUser?.uid
                 if (senderUid != null && myUid != null && senderUid == myUid) return
-                val localName = prefs.getString(Constants.Prefs.USER_NAME, null)
-                if (senderUid == null && !localName.isNullOrBlank() && sender == localName) return
+                val cloudId = data["cloudId"] ?: ""
+                val body = data["body"]?.takeIf { it.isNotBlank() }
+                    ?: getString(R.string.chat_notif_default_body)
+                val notificationId = cloudId.hashCode().takeIf { it != 0 } ?: body.hashCode()
 
-                postNotification(
-                    channelId = CHANNEL_ID,
-                    notificationId = cloudId.hashCode().takeIf { it != 0 } ?: body.hashCode(),
-                    title = sender,
-                    text = body
-                )
+                if (senderUid == null) {
+                    // Payload lama (pra-r1.7.4): fallback nama dari payload.
+                    val sender = data["sender"]?.takeIf { it.isNotBlank() } ?: return
+                    val localName = prefs.getString(Constants.Prefs.USER_NAME, null)
+                    if (!localName.isNullOrBlank() && sender == localName) return
+                    postNotification(
+                        CHANNEL_ID, sender, body, notificationId,
+                        type = TYPE_CHAT,
+                        familyId = prefs.getString(Constants.Prefs.WORKSPACE_PIN, null)
+                    )
+                    return
+                }
+
+                val familyId = data[EXTRA_FAMILY_ID]?.takeIf { it.isNotBlank() }
+                    ?: prefs.getString(Constants.Prefs.WORKSPACE_PIN, null)
+                ioScope.launch {
+                    val name = resolveMemberName(familyId, senderUid)
+                    postNotification(
+                        CHANNEL_ID, name, body, notificationId,
+                        type = TYPE_CHAT,
+                        familyId = familyId,
+                        cloudId = cloudId
+                    )
+                }
             }
         }
     }
 
-    /** Tampilkan notifikasi (chat atau keanggotaan) dengan payload generik. */
+    /**
+     * Tampilkan notifikasi (chat atau keanggotaan) dengan payload generik.
+     *
+     * R2-H1: PendingIntent kini membawa extras kontrak handoff (lihat konstanta
+     * companion) dan requestCode UNIK per pesan. Sebelumnya requestCode konstan 0
+     * + FLAG_UPDATE_CURRENT membuat extras notifikasi terakhir menimpa semua
+     * notifikasi lain — tap notifikasi lama membuka chat/workspace yang salah
+     * (dead tap).
+     */
     private fun postNotification(
         channelId: String,
         title: String,
         text: String,
-        notificationId: Int = title.hashCode() xor text.hashCode()
+        notificationId: Int = title.hashCode() xor text.hashCode(),
+        type: String = TYPE_CHAT,
+        familyId: String? = null,
+        cloudId: String? = null,
+        requesterUid: String? = null
     ) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_TYPE, type)
+            putExtra(EXTRA_FAMILY_ID, familyId)
+            putExtra(EXTRA_CLOUD_ID, cloudId)
+            putExtra(EXTRA_REQUESTER_UID, requesterUid)
+            // Kandidat PIN dikirim, tapi MainActivity WAJIB memastikan user masih
+            // member sebelum memakainya (hindari membuka workspace yang salah).
+            putExtra(EXTRA_WORKSPACE_PIN, familyId)
         }
+        // R2-H1: requestCode UNIK dari cloudId/requesterUid — bukan konstan 0.
+        val handoffKey = cloudId?.takeIf { it.isNotBlank() }
+            ?: requesterUid?.takeIf { it.isNotBlank() }
+            ?: familyId?.takeIf { it.isNotBlank() }
+            ?: title
+        val requestCode = handoffKey.hashCode() and 0x7fffffff
         val pending = PendingIntent.getActivity(
-            this, 0, intent,
+            this, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         // Audit ikon 2026-08-12: small icon harus MONOKROM (ic_stat_logo).
@@ -146,6 +198,32 @@ class ChatMessageFirebaseService : FirebaseMessagingService() {
         val uid = requesterUid?.takeIf { it.isNotBlank() }
         return uid?.hashCode()?.takeIf { it != 0 }
             ?: (getString(R.string.notif_join_request_title).hashCode() and 0x7fffffff)
+    }
+
+    /** Audit L3: resolve nama anggota dari Firestore (bukan dari payload FCM). */
+    private suspend fun resolveMemberName(familyId: String?, senderUid: String): String {
+        val fallback = getString(R.string.sender_anggota)
+        if (familyId.isNullOrBlank()) return fallback
+        return runCatching {
+            val snap = FirebaseFirestore.getInstance()
+                .collection(Constants.Collections.FAMILIES).document(familyId)
+                .collection(Constants.Collections.MEMBERS).document(senderUid)
+                .get().await()
+            snap.getString(Constants.Fields.NAME)?.takeIf { it.isNotBlank() } ?: fallback
+        }.getOrDefault(fallback)
+    }
+
+    /** Audit L3: nama PEMOHON (belum jadi anggota) dari joinRequests doc. */
+    private suspend fun resolveRequesterName(familyId: String?, requesterUid: String?): String {
+        val fallback = getString(R.string.sender_anggota)
+        if (familyId.isNullOrBlank() || requesterUid.isNullOrBlank()) return fallback
+        return runCatching {
+            val snap = FirebaseFirestore.getInstance()
+                .collection(Constants.Collections.FAMILIES).document(familyId)
+                .collection(Constants.Collections.JOIN_REQUESTS).document(requesterUid)
+                .get().await()
+            snap.getString(Constants.Fields.NAME)?.takeIf { it.isNotBlank() } ?: fallback
+        }.getOrDefault(fallback)
     }
 
     override fun onNewToken(token: String) {
@@ -190,6 +268,17 @@ class ChatMessageFirebaseService : FirebaseMessagingService() {
         const val CHANNEL_ID = "chat_messages"
         // r1.6.0: kanal notifikasi keanggotaan (permintaan bergabung & keputusan).
         const val CHANNEL_ID_MEMBERSHIP = "workspace_activity"
+
+        // R2-H1 — KONTRAK EXTRAS HANDOFF notifikasi → MainActivity.
+        // Nama kunci sengaja sama dengan payload FCM/cloud function.
+        const val EXTRA_TYPE = "type"
+        const val EXTRA_FAMILY_ID = "familyId"
+        const val EXTRA_CLOUD_ID = "cloudId"
+        const val EXTRA_REQUESTER_UID = "requesterUid"
+        /** Kandidat PIN workspace; dipakai HANYA bila user masih member. */
+        const val EXTRA_WORKSPACE_PIN = "workspacePin"
+        const val TYPE_CHAT = "chat"
+        const val TYPE_JOIN_REQUEST = "join_request"
 
         // Payload keys cloud function handleJoinRequest (r1.6.0) — sinkron dengan
         // functions/index.js.

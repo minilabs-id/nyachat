@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,7 +43,9 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -83,16 +86,17 @@ import com.startupmini.nyachat.data.remote.E2eeSyncManager
 import com.startupmini.nyachat.data.remote.FirestoreSyncManager
 import com.startupmini.nyachat.data.remote.MembershipManager
 import com.startupmini.nyachat.data.remote.ReceiptInfo
+import com.startupmini.nyachat.data.remote.SyncStatus
 import com.startupmini.nyachat.data.remote.receiptStats
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.local.ChatMessage
 import com.startupmini.nyachat.data.remote.ImageFileUtil
+import com.startupmini.nyachat.ui.AppSnackbar
 import com.startupmini.nyachat.ui.theme.LocalSemanticColors
 import com.startupmini.nyachat.ui.theme.Motion
 import com.startupmini.nyachat.ui.util.dayLabel
 import com.startupmini.nyachat.ui.util.isSameDay
 import java.io.File
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Baris chat: pemisah tanggal atau pesan (dengan flag header grup pengirim). */
@@ -136,7 +140,12 @@ fun ChatScreen(
     resetChatInputTrigger: Int = 0,
     // r1.2.3 (P1): map nama-tampilan → path foto avatar (untuk header bubble
     // pesan masuk). Dibangun MainActivity dari daftar member + foto diri sendiri.
-    senderAvatarPaths: Map<String, String> = emptyMap()
+    senderAvatarPaths: Map<String, String> = emptyMap(),
+    // Audit UX H2: callback "Kirim ulang". Tidak ada callback resend eksplisit
+    // dari pemilik state; default-nya memakai mekanisme sinkronisasi terdekat
+    // (FirestoreSyncManager.syncMessage — queue-aware dengan retry offline).
+    // Ditaruh PALING AKHIR + default agar pemanggil/test lama tetap kompilasi.
+    onRetrySend: ((ChatMessage) -> Unit)? = null
 ) {
     // isDark dari token semantik (single source of truth) — pola luminance()
     // yang rapuh sudah ditinggalkan (audit konsistensi 2026-08-11).
@@ -158,6 +167,10 @@ fun ChatScreen(
     var viewerMessage by remember { mutableStateOf<ChatMessage?>(null) }
     // r1.7.1: dialog "Info Pesan" — daftar anggota yang menerima/membaca.
     var infoMessage by remember { mutableStateOf<ChatMessage?>(null) }
+    // R2-B7: id pesan yang sedang dicoba kirim ulang → indikator RETRYING.
+    var retryingIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    // B6: guard sekali-ketuk untuk konfirmasi hapus/edit pesan.
+    var messageActionInFlight by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -170,6 +183,16 @@ fun ChatScreen(
 
     val inputFocusRequester = remember { FocusRequester() }
     val context = LocalContext.current
+
+    // R2-H5: SATU kanal umpan balik global (AppSnackbar) — SnackbarHost lokal
+    // dihapus; MainActivity memasang host-nya.
+    val attachmentSaveFailedLabel = stringResource(R.string.ux_attachment_save_failed)
+    val copiedLabel = stringResource(R.string.ux_copied)
+    val resendPendingLabel = stringResource(R.string.ux_resend_pending)
+    val resendSuccessLabel = stringResource(R.string.ux_resend_success)
+    val showSnack: (String) -> Unit = { message -> AppSnackbar.show(message) }
+    // Audit UX H2: sinkronisasi gagal dipakai untuk menandai pesan FAILED.
+    val syncStatus by FirestoreSyncManager.syncStatus.collectAsState()
 
     // BUG-08: reset draf tetap diproses di sini (nulis ke state hoisted) —
     // karakter sisa (mis. titik ribuan dari kolom nominal) tidak menempel.
@@ -185,7 +208,13 @@ fun ChatScreen(
                 // "Menyimpan…" tidak boleh macet selamanya (reviewer response audit).
                 try {
                     isSavingAttachment = true
-                    pendingImagePath = ImageFileUtil.saveImageFromUri(context, uri, workspacePin)
+                    val savedPath = ImageFileUtil.saveImageFromUri(context, uri, workspacePin)
+                    if (savedPath != null) {
+                        pendingImagePath = savedPath
+                    } else {
+                        // Audit UX H2: simpan gagal (disk penuh / IO error) → snackbar.
+                        showSnack(attachmentSaveFailedLabel)
+                    }
                 } finally {
                     isSavingAttachment = false
                 }
@@ -197,7 +226,13 @@ fun ChatScreen(
             coroutineScope.launch {
                 try {
                     isSavingAttachment = true
-                    pendingImagePath = ImageFileUtil.saveImageFromUri(context, uri, workspacePin)
+                    val savedPath = ImageFileUtil.saveImageFromUri(context, uri, workspacePin)
+                    if (savedPath != null) {
+                        pendingImagePath = savedPath
+                    } else {
+                        // Audit UX H2: simpan gagal (disk penuh / IO error) → snackbar.
+                        showSnack(attachmentSaveFailedLabel)
+                    }
                 } finally {
                     isSavingAttachment = false
                 }
@@ -215,6 +250,9 @@ fun ChatScreen(
                     if (saved != null) {
                         pendingFilePath = saved.path
                         pendingFileName = saved.name
+                    } else {
+                        // Audit UX H2: simpan PDF gagal → snackbar (jangan senyap).
+                        showSnack(attachmentSaveFailedLabel)
                     }
                 } finally {
                     isSavingAttachment = false
@@ -266,6 +304,33 @@ fun ChatScreen(
         }
     }
 
+    // Audit UX M3: "di bawah" sekarang berarti item TERAKHIR benar-benar terlihat
+    // DAN menempel di tepi bawah viewport — bukan lagi "dalam 4 item terakhir"
+    // (threshold lama menarik user yang sedang membaca pesan di atasnya).
+    fun lastVisibleFlushWithBottom(): Boolean {
+        val info = listState.layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: return false
+        return last.offset + last.size >= info.viewportEndOffset - 8
+    }
+
+    fun isTrulyAtBottom(): Boolean {
+        val info = listState.layoutInfo
+        if (info.totalItemsCount == 0) return true
+        val last = info.visibleItemsInfo.lastOrNull() ?: return false
+        return last.index == info.totalItemsCount - 1 && lastVisibleFlushWithBottom()
+    }
+
+    /** Ikuti pesan baru hanya bila user masih menempel di dasar (atau di posisi
+     *  anchor terakhir yang ditinggalkan saat sync bertahap menyisipkan pesan). */
+    fun shouldFollowLatest(): Boolean {
+        val info = listState.layoutInfo
+        if (info.totalItemsCount == 0) return true
+        val last = info.visibleItemsInfo.lastOrNull() ?: return false
+        if (!lastVisibleFlushWithBottom()) return false
+        return last.index == info.totalItemsCount - 1 ||
+            (lastAnchorIndex >= 0 && last.index == lastAnchorIndex)
+    }
+
     // Auto-scroll: halus kalau sudah di bawah & ada konten baru; instan saat pertama
     // dibuka; TIDAK menarik user yang sedang membaca riwayat di atas.
     //
@@ -277,12 +342,10 @@ fun ChatScreen(
     // tinggalkan (lastVisible == lastAnchorIndex), terus ikuti ke pesan terbaru.
     LaunchedEffect(rows.size, isAiThinking) {
         if (rows.isNotEmpty()) {
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val atBottom = info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 4
             val firstOpen = lastKnownCount == -1
-            val untouched = lastVisible == lastAnchorIndex
-            if (firstOpen || atBottom || untouched) {
+            // Audit UX M3: atBottom kini mensyaratkan item terakhir benar-benar
+            // terlihat di tepi bawah; anchor lama hanya diikuti bila masih flush.
+            if (firstOpen || shouldFollowLatest()) {
                 if (firstOpen) {
                     listState.scrollToItem(rows.size - 1)
                 } else {
@@ -308,18 +371,17 @@ fun ChatScreen(
     // (semua anggota lain baca) — diingat sesi ini karena server menghapus
     // marker begitu semua baca; tanpa ini titik pelangi "turun" jadi abu lagi.
     var rainbowIdsState by remember { mutableStateOf<Set<String>>(emptySet()) }
-    LifecycleResumeEffect(Unit) {
+    // Audit UX M2: key rows.size — effect lama meng-capture `rows` dari
+    // komposisi pertama, sehingga pesan yang tiba saat app di background tidak
+    // pernah di-scroll ke bawah saat resume.
+    LifecycleResumeEffect(rows.size) {
         isChatResumed = true
         coroutineScope.launch {
-            delay(120)
-            if (rows.isNotEmpty()) {
-                val info = listState.layoutInfo
-                val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-                val atBottom = info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 4
-                if (atBottom || lastVisible == lastAnchorIndex) {
-                    listState.scrollToItem(rows.size - 1)
-                    lastAnchorIndex = rows.size - 1
-                }
+            // B10: delay(120) "magic number" dihapus — re-anchor langsung saat
+            // resume, tanpa menunggu frame yang tidak deterministik.
+            if (rows.isNotEmpty() && shouldFollowLatest()) {
+                listState.scrollToItem(rows.size - 1)
+                lastAnchorIndex = rows.size - 1
             }
         }
         onPauseOrDispose { isChatResumed = false }
@@ -329,12 +391,11 @@ fun ChatScreen(
     // tadinya menempel di dasar ikut "naik". Kalau user memang sedang di dekat dasar,
     // kembalikan posisi ke pesan terbaru supaya tetap terlihat tepat di atas input.
     val imeVisible = WindowInsets.isImeVisible
-    LaunchedEffect(imeVisible) {
-        if (imeVisible && rows.isNotEmpty()) {
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val nearBottom = info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 4
-            if (nearBottom) listState.scrollToItem(rows.size - 1)
+    // Audit UX M2: rows.size ikut jadi key — keyboard muncul bersamaan dengan
+    // pesan baru tidak lagi memakai snapshot `rows` yang sudah basi.
+    LaunchedEffect(imeVisible, rows.size) {
+        if (imeVisible && rows.isNotEmpty() && shouldFollowLatest()) {
+            listState.scrollToItem(rows.size - 1)
         }
     }
 
@@ -353,6 +414,35 @@ fun ChatScreen(
             pendingFilePath = null
             pendingFileName = null
             replyTarget = null
+        }
+    }
+
+    // Audit UX H2: tidak ada callback resend khusus dari pemilik state →
+    // jalur terdekat adalah FirestoreSyncManager.syncMessage (queue-aware,
+    // otomatis di-retry saat online). Bisa dioverride via onRetrySend.
+    val retrySend: (ChatMessage) -> Unit = { target ->
+        // B6: guard anti double-submit saat kirim ulang masih berjalan.
+        if (target.id in retryingIds) return@retrySend
+        // R2-B7: info "menunggu" ditampilkan SEGERA, indikator masuk
+        // RETRYING, lalu hasil baru dilaporkan setelah sync selesai.
+        retryingIds = retryingIds + target.id
+        showSnack(resendPendingLabel)
+        coroutineScope.launch {
+            val override = onRetrySend
+            if (override != null) {
+                // Override milik pemilik state bisa mengembalikan hasil nyata.
+                val ok = runCatching { override(target) }.isSuccess
+                if (ok) showSnack(resendSuccessLabel) else showSnack(resendPendingLabel)
+            } else {
+                // Review: FirestoreSyncManager.syncMessage() suspend Unit dan
+                // menelan error (enqueue/PERMISSION_DENIED) — runCatching.isSuccess
+                // SELALU true, jadi dulu muncul "berhasil" palsu. Jalur default
+                // HANYA bisa memastikan pesan masuk antrean; keberhasilan bilayer
+                // dibuktikan oleh receipt server, bukan oleh return value ini.
+                FirestoreSyncManager.syncMessage(target)
+                showSnack(resendPendingLabel)
+            }
+            retryingIds = retryingIds - target.id
         }
     }
 
@@ -402,7 +492,7 @@ fun ChatScreen(
                         start = 12.dp, end = 12.dp, top = 12.dp, bottom = listBottomPadding
                     )
                 ) {
-                if (messages.isEmpty() && !isAiThinking) {
+                if (messages.isEmpty()) {
                     item {
                         Column(
                             modifier = Modifier
@@ -411,24 +501,40 @@ fun ChatScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ChatBubbleOutline,
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                stringResource(R.string.chat_empty_title),
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                stringResource(R.string.chat_empty_hint),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                            )
+                            if (isAiThinking) {
+                                // Audit UX M4: riwayat kosong + AI memproses →
+                                // jangan biarkan background kosong tanpa umpan balik.
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(40.dp),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    stringResource(R.string.ux_ai_thinking_empty),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.ChatBubbleOutline,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    stringResource(R.string.chat_empty_title),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    stringResource(R.string.chat_empty_hint),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
                         }
                     }
                 }
@@ -447,23 +553,38 @@ fun ChatScreen(
                             val clipboard = LocalClipboardManager.current
                             val msg = row.message
                             // r1.7.1: status titik baca/diterima per bubble milik user
-                            // (pengganti centang ✓/✓✓ r1.7.0). PENDING saat belum punya
-                            // cloudId; SYNCED + stats → deretan titik; allRead → pelangi.
-                            val delivery = when {
-                                msg.sender != activeSender -> null
-                                msg.cloudId.isNullOrBlank() -> DeliveryStatus.PENDING
-                                else -> DeliveryStatus.SYNCED
-                            }
+                            // (pengganti centang ✓/✓✓ r1.7.0).
+                            // Audit UX H1 (status honesty): FinanceRepository menulis
+                            // delivery=SYNCED + cloudId SEBELUM sinkronisasi berhasil.
+                            // Karena repository tidak bisa diubah di sini, selama
+                            // belum ada deliveredBy/readBy dari server pesan TIDAK
+                            // boleh tampil sebagai "diterima 0 dari N" — pakai jam
+                            // PENDING sampai receipt nyata tersedia.
+                            val receipt = msg.cloudId?.let { receipts[it] }
+                            val hasServerReceipt = receipt != null &&
+                                (receipt.deliveredBy.isNotEmpty() || receipt.readBy.isNotEmpty())
                             // Semua anggota lain sudah baca → titik pelangi. Server
                             // menghapus marker begitu itu terjadi (cleanupReceipt),
                             // jadi status pelangi diINGAT sesi ini supaya tidak
                             // "turun" lagi jadi titik abu setelah marker hilang.
                             val rainbowIds = rainbowIdsState
-                            val dotsStats = if (delivery != null && msg.cloudId != null) {
-                                val stats = receiptStats(receipts[msg.cloudId], otherUids)
-                                if (stats.allRead || rainbowIds.contains(msg.cloudId)) {
-                                    stats.copy(allRead = true)
-                                } else stats
+                            val isRainbow = msg.cloudId != null && msg.cloudId in rainbowIds
+                            // Audit UX H2: ChatMessage tidak punya flag failed → turunan
+                            // dari status sinkronisasi global saat belum ada receipt.
+                            val isSyncFailed = syncStatus == SyncStatus.ERROR
+                            val delivery = when {
+                                msg.sender != activeSender -> null
+                                // R2-B7: sedang kirim ulang → indikator RETRYING.
+                                msg.id in retryingIds -> DeliveryStatus.RETRYING
+                                msg.cloudId.isNullOrBlank() -> DeliveryStatus.PENDING
+                                // Audit UX H2: syncStatus ERROR → FAILED + "Kirim ulang".
+                                isSyncFailed && !hasServerReceipt && !isRainbow -> DeliveryStatus.FAILED
+                                !hasServerReceipt && !isRainbow -> DeliveryStatus.PENDING
+                                else -> DeliveryStatus.SYNCED
+                            }
+                            val dotsStats = if (delivery == DeliveryStatus.SYNCED && msg.cloudId != null) {
+                                val stats = receiptStats(receipt, otherUids)
+                                if (stats.allRead || isRainbow) stats.copy(allRead = true) else stats
                             } else null
                             // r1.7.1: tandai pesan anggota lain DIBACA begitu bubble
                             // tampil di layar (chat resumed). Sekali per komposisi;
@@ -536,16 +657,35 @@ fun ChatScreen(
                                                 menuOpen = false
                                             }
                                         )
+                                        // Audit UX H2: ajakan kirim ulang untuk pesan
+                                        // milik sendiri yang belum terkonfirmasi server.
+                                        // Review: syncMessage() no-op bila cloudId kosong
+                                        // (pesan legacy/restore) — jangan tawarkan aksi yang
+                                        // tidak melakukan apa pun.
+                                        if ((delivery == DeliveryStatus.FAILED ||
+                                                delivery == DeliveryStatus.PENDING) &&
+                                            !msg.cloudId.isNullOrBlank()
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.ux_retry_send)) },
+                                                leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+                                                onClick = {
+                                                    retrySend(msg)
+                                                    menuOpen = false
+                                                }
+                                            )
+                                        }
                                     }
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.chat_copy)) },
                                         leadingIcon = { Icon(Icons.Rounded.ContentCopy, contentDescription = null) },
                                         onClick = {
                                             clipboard.setText(AnnotatedString(msg.messageText))
+                                            // Audit UX M5: konfirmasi ringan "Disalin".
+                                            showSnack(copiedLabel)
                                             menuOpen = false
                                         }
                                     )
-                                    val receipt = receipts[msg.cloudId]
                                     if (receipt != null) {
                                         DropdownMenuItem(
                                             text = { Text(stringResource(R.string.chat_message_info)) },
@@ -605,7 +745,12 @@ fun ChatScreen(
                 if (draftText.isBlank() && quickSuggestions.isNotEmpty()) {
                     QuickSuggestionRow(
                         suggestions = quickSuggestions,
-                        onSuggestionClicked = { onDraftChange(it) },
+                        // Audit UX M6: isi draf lalu alihkan fokus ke kolom input
+                        // supaya user bisa langsung mengetik/mengirim.
+                        onSuggestionClicked = {
+                            onDraftChange(it)
+                            inputFocusRequester.requestFocus()
+                        },
                         startPadding = chipShift,
                         modifier = Modifier.align(Alignment.BottomCenter)
                     )
@@ -676,6 +821,8 @@ fun ChatScreen(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
+                        // Audit UX M1: visual 40dp, area sentuh ≥48dp.
+                        .minimumInteractiveComponentSize()
                         .clip(CircleShape)
                         .background(fabFill, CircleShape)
                         // clickable SEBELUM border (reviewer 2026-08-12): ripple
@@ -732,9 +879,13 @@ fun ChatScreen(
             }
 
             // r1.7.1 (#2): E2EE aktif tapi kunci lokal belum siap → kirim pesan
-            // BARU ditunda (tidak diam-diam turun ke plaintext). Banner kecil
-            // menjelaskan; auto-pulih via self-heal (wrap re-install device baru).
-            if (e2eeStatus.active && !e2eeStatus.ready) {
+            // BARU ditunda (tidak diam-diam turun ke plaintext). Audit M9: status
+            // UNKNOWN saat startup juga diblokir & HARUS ditampilkan — sebelumnya
+            // banner tidak muncul sehingga pesan terlihat terkirim padahal hanya
+            // masuk antrean lokal.
+            val e2eeChecking = E2eeSyncManager.activationState ==
+                com.startupmini.nyachat.data.remote.E2eeSyncManager.ActivationState.UNKNOWN
+            if (e2eeChecking || (e2eeStatus.active && !e2eeStatus.ready)) {
                 Surface(
                     color = MaterialTheme.colorScheme.tertiaryContainer,
                     contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -751,7 +902,10 @@ fun ChatScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = stringResource(R.string.chat_e2ee_preparing),
+                            text = stringResource(
+                                if (e2eeChecking) R.string.chat_e2ee_checking
+                                else R.string.chat_e2ee_preparing
+                            ),
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -802,24 +956,42 @@ fun ChatScreen(
             } // end ModalBottomSheet if-block
         } // end Column
 
-        // Konfirmasi hapus pesan
+        // Konfirmasi hapus pesan — B6: inFlight guard + tombol nonaktif.
+        // onDeleteMessage adalah callback fire-and-forget (Unit) dari pemilik
+        // state: tidak ada hasil yang bisa diumumkan tanpa mengarang "sukses".
         pendingDelete?.let { msg ->
             AlertDialog(
-                onDismissRequest = { pendingDelete = null },
+                onDismissRequest = {
+                    if (!messageActionInFlight) {
+                        pendingDelete = null
+                        inputFocusRequester.requestFocus() // B11
+                    }
+                },
                 title = { Text(stringResource(R.string.confirm_delete_message_title)) },
                 text = { Text(stringResource(R.string.confirm_delete_message_text)) },
                 confirmButton = {
                     TextButton(
+                        enabled = !messageActionInFlight,
                         onClick = {
+                            if (messageActionInFlight) return@TextButton
+                            messageActionInFlight = true
                             onDeleteMessage(msg.id)
+                            messageActionInFlight = false
                             pendingDelete = null
+                            inputFocusRequester.requestFocus() // B11
                         }
                     ) {
                         Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { pendingDelete = null }) {
+                    TextButton(
+                        onClick = {
+                            pendingDelete = null
+                            inputFocusRequester.requestFocus() // B11
+                        },
+                        enabled = !messageActionInFlight
+                    ) {
                         Text(stringResource(R.string.action_cancel))
                     }
                 }
@@ -831,14 +1003,21 @@ fun ChatScreen(
             var editText by remember(msg.id) { mutableStateOf(msg.messageText) }
 
             // F3 (audit focus order): fokus langsung ke kolom teks saat dialog edit dibuka.
-            val editFocusRequester = remember { FocusRequester() }
-            LaunchedEffect(Unit) {
-                delay(120)
+            // Audit UX M7: Requester & effect di-key by msg.id — membuka edit pesan
+            // lain tidak lagi memakai Requester/FocusEffect dari pesan sebelumnya.
+            val editFocusRequester = remember(msg.id) { FocusRequester() }
+            // B10: fokus tanpa delay(120) "magic number".
+            LaunchedEffect(msg.id) {
                 editFocusRequester.requestFocus()
             }
 
             AlertDialog(
-                onDismissRequest = { editingMessage = null },
+                onDismissRequest = {
+                    if (!messageActionInFlight) {
+                        editingMessage = null
+                        inputFocusRequester.requestFocus() // B11
+                    }
+                },
                 title = { Text(stringResource(R.string.chat_edit_title)) },
                 text = {
                     Column {
@@ -860,17 +1039,27 @@ fun ChatScreen(
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = editText.isNotBlank(),
+                        enabled = editText.isNotBlank() && !messageActionInFlight,
                         onClick = {
+                            if (messageActionInFlight) return@TextButton
+                            messageActionInFlight = true
                             onEditMessage(msg.id, editText)
+                            messageActionInFlight = false
                             editingMessage = null
+                            inputFocusRequester.requestFocus() // B11
                         }
                     ) {
                         Text(stringResource(R.string.chat_save_edit))
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { editingMessage = null }) {
+                    TextButton(
+                        onClick = {
+                            editingMessage = null
+                            inputFocusRequester.requestFocus() // B11
+                        },
+                        enabled = !messageActionInFlight
+                    ) {
                         Text(stringResource(R.string.action_cancel))
                     }
                 }
@@ -882,7 +1071,10 @@ fun ChatScreen(
             msg.imagePath?.let { path ->
                 ImageViewerDialog(
                     imagePath = path,
-                    onDismiss = { viewerMessage = null }
+                    onDismiss = {
+                        viewerMessage = null
+                        inputFocusRequester.requestFocus() // B11
+                    }
                 )
             }
         }
@@ -894,7 +1086,10 @@ fun ChatScreen(
                 MessageInfoDialog(
                     receipt = r,
                     memberLabels = memberLabels,
-                    onDismiss = { infoMessage = null }
+                    onDismiss = {
+                        infoMessage = null
+                        inputFocusRequester.requestFocus() // B11
+                    }
                 )
             }
         }

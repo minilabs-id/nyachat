@@ -10,12 +10,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.GroupOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -25,13 +31,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.startupmini.nyachat.BuildConfig
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.backup.DriveBackupController
 import com.startupmini.nyachat.data.local.SecureStorage
 import com.startupmini.nyachat.data.remote.GitHubUpdateChecker
 import com.startupmini.nyachat.data.remote.MyWorkspace
+import com.startupmini.nyachat.data.remote.UpdateCheckResult
 import com.startupmini.nyachat.ui.screens.AddTransactionDialog
 import com.startupmini.nyachat.ui.screens.AiReportDialog
 import com.startupmini.nyachat.ui.screens.ApiKeyDialog
@@ -113,6 +119,45 @@ fun MainAppDialogs(
 ) {
     val backupBusy by driveController.busy.collectAsStateWithLifecycle()
 
+    // R2-H4/H6/H10/B18: resolve string di composable scope, bukan di coroutine
+    // (lint LocalContextGetResourceValueCall). Semua feedback lewat AppSnackbar —
+    // satu kanal, satu host di MainOverlays.
+    val updateCheckFailedLabel = stringResource(R.string.ux_update_check_failed)
+    val retryCheckLabel = stringResource(R.string.ux_retry_check)
+    val updateNoUpdateLabel = stringResource(R.string.update_no_update)
+    val apiKeySavedLabel = stringResource(R.string.ux_api_key_saved)
+    val apiKeySaveFailedLabel = stringResource(R.string.ux_api_key_save_failed)
+    val clearingDataLabel = stringResource(R.string.ux_clearing_data)
+    val clearDataSuccessLabel = stringResource(R.string.ux_clear_data_success)
+    val clearDataFailedLabel = stringResource(R.string.ux_clear_data_failed)
+    val notifSettingsNoteLabel = stringResource(R.string.ux_notif_settings_note)
+
+    // R2-H4: satu jalur cek update (dipakai tombol Settings & aksi Coba Lagi).
+    fun runUpdateCheck() {
+        dialogs.isCheckingUpdate = true
+        dialogs.updateMessageIsError = false
+        dialogs.updateMessage = null
+        scope.launch {
+            when (val result = GitHubUpdateChecker.checkLatestResult()) {
+                is UpdateCheckResult.Update -> dialogs.updateInfo = result.release
+                UpdateCheckResult.UpToDate -> {
+                    dialogs.updateMessage = updateNoUpdateLabel
+                }
+                UpdateCheckResult.Error -> {
+                    AppSnackbar.show(
+                        message = updateCheckFailedLabel,
+                        actionLabel = retryCheckLabel,
+                        onAction = { runUpdateCheck() }
+                    )
+                }
+            }
+            dialogs.isCheckingUpdate = false
+        }
+    }
+
+    // R2-H10: progress hapus data (dipakai "Hapus Semua Data" & "Keluar & Hapus Data").
+    var isClearingData by remember { mutableStateOf(false) }
+
     // Launcher pilih foto profil (r1.2.1) — Galeri & Kamera, pola sama seperti
     // lampiran chat di ChatScreen. File hasil kamera lewat FileProvider ke
     // cacheDir, lalu MainActivity yang menyimpan ke AvatarStore (custom.jpg).
@@ -145,11 +190,26 @@ fun MainAppDialogs(
                         tx.type, tx.category, tx.amount, tx.description, tx.loggedBy
                     )
                 }
-                dialogs.showAddDialog = false
-                dialogs.editTarget = null
-                // Audit bug (2026-08-12): reset trigger chat dipindah ke onDismiss
-                // saja — dialog selalu memanggil onDismiss() SETELAH onConfirm(),
-                // jadi menaikkannya di sini membuatnya berjalan 2× per simpan.
+                // B3/BUG-08: JANGAN set showAddDialog=false di sini — itu
+                // membatalkan coroutine dismiss() di dalam sheet sehingga
+                // onDismiss() tidak jalan dan reset draf chat hilang.
+                // editTarget juga dibersihkan di onDismiss, bukan di sini.
+            },
+            // B3: jalur async — sheet menutup DIRI SENDIRI lewat dismiss() →
+            // onDismiss() setelah onResult(true). Kegagalan insert/update
+            // dilaporkan ViewModel via operationFailed → MainActivity →
+            // AppSnackbar(ux_save_failed + ux_retry → retryLastFailedOperation()).
+            onConfirmAsync = { tx, onResult ->
+                // B3/review: onResult HARUS memakai hasil persistensi NYATA —
+                // dulu selalu true sehingga sheet tertutup walau insert gagal.
+                if (dialogs.editTarget != null) {
+                    viewModel.updateTransaction(tx, onResult = onResult)
+                } else {
+                    viewModel.addManualTransaction(
+                        tx.type, tx.category, tx.amount, tx.description, tx.loggedBy,
+                        onResult = onResult
+                    )
+                }
             }
         )
     }
@@ -168,18 +228,18 @@ fun MainAppDialogs(
             onDismiss = { dialogs.showSettingsSheet = false },
             onToggleDarkMode = onToggleDarkMode,
             chatNotificationsEnabled = chatNotificationsEnabled,
-            onToggleChatNotifications = onToggleChatNotifications,
+            onToggleChatNotifications = {
+                onToggleChatNotifications()
+                // B18: toggle-nya dimiliki SettingsSheet (file lain). Helper text
+                // ditampilkan lewat kanal snackbar tunggal saat toggle ditekan.
+                AppSnackbar.show(notifSettingsNoteLabel)
+            },
             onToggleBackupEncryption = onToggleBackupEncryption,
             onCheckUpdate = {
-                dialogs.showSettingsSheet = false
-                scope.launch {
-                    val release = GitHubUpdateChecker.checkLatest()
-                    if (release != null && GitHubUpdateChecker.isNewer(release.versionName, BuildConfig.VERSION_NAME)) {
-                        dialogs.updateInfo = release
-                    } else {
-                        showSnack(context.getString(R.string.update_no_update), null, null)
-                    }
-                }
+                // R2-H4: jangan anggap error = "sudah terbaru". Loading state
+                // (dialog "Memeriksa…" dengan judul ux_update_check_title) tampil
+                // di MainOverlays selama isCheckingUpdate = true.
+                runUpdateCheck()
             },
             onGeminiKey = {
                 dialogs.showSettingsSheet = false
@@ -260,13 +320,21 @@ fun MainAppDialogs(
             initialKey = geminiKey ?: "",
             onDismiss = { dialogs.showGeminiKeyDialog = false },
             onSave = { newKey ->
-                // Keystore crypto di IO (audit local/ 2026-08-13) — sebelumnya
-                // sinkron di main thread (jank saat hardware-backed key).
-                scope.launch { secureStorage.putSecretAsync(context, Constants.Prefs.GEMINI_API_KEY, newKey) }
-                onGeminiKeySaved(newKey)
-                dialogs.showGeminiKeyDialog = false
-                // Audit response (2026-08-12): konfirmasi eksplisit kunci tersimpan.
-                showSnack(context.getString(R.string.api_key_saved), null, null)
+                // R2-H6: TUNGGU hasil Keystore. Dialog sengaja DIBIARKAN terbuka
+                // (spinner bawaan ApiKeyDialog aktif) sampai putSecretAsync selesai;
+                // snackbar hanya dipanggil SETELAH onSave/penyimpanan selesai.
+                scope.launch {
+                    val saved = secureStorage.putSecretAsync(
+                        context, Constants.Prefs.GEMINI_API_KEY, newKey
+                    )
+                    if (saved) {
+                        onGeminiKeySaved(newKey)
+                        dialogs.showGeminiKeyDialog = false
+                        AppSnackbar.show(apiKeySavedLabel)
+                    } else {
+                        AppSnackbar.show(apiKeySaveFailedLabel)
+                    }
+                }
             }
         )
     }
@@ -278,12 +346,19 @@ fun MainAppDialogs(
             initialKey = openRouterKey ?: "",
             onDismiss = { dialogs.showOpenRouterKeyDialog = false },
             onSave = { newKey ->
-                // Keystore crypto di IO (audit local/ 2026-08-13).
-                scope.launch { secureStorage.putSecretAsync(context, Constants.Prefs.OPENROUTER_API_KEY, newKey) }
-                onOpenRouterKeySaved(newKey)
-                dialogs.showOpenRouterKeyDialog = false
-                // Audit response (2026-08-12): konfirmasi eksplisit kunci tersimpan.
-                showSnack(context.getString(R.string.api_key_saved), null, null)
+                // R2-H6: tunggu hasil Keystore sebelum menutup dialog / snackbar.
+                scope.launch {
+                    val saved = secureStorage.putSecretAsync(
+                        context, Constants.Prefs.OPENROUTER_API_KEY, newKey
+                    )
+                    if (saved) {
+                        onOpenRouterKeySaved(newKey)
+                        dialogs.showOpenRouterKeyDialog = false
+                        AppSnackbar.show(apiKeySavedLabel)
+                    } else {
+                        AppSnackbar.show(apiKeySaveFailedLabel)
+                    }
+                }
             }
         )
     }
@@ -306,26 +381,60 @@ fun MainAppDialogs(
         )
     }
 
-    if (dialogs.showConfirmClearDialog) {
+    // R2-H10: progress hapus data — dialog konfirmasi digantikan indikator
+    // sampai operasi selesai; dialog hanya ditutup SETELAH ada hasil.
+    if (isClearingData) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(clearingDataLabel) },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(clearingDataLabel)
+                }
+            },
+            confirmButton = {}
+        )
+    } else if (dialogs.showConfirmClearDialog) {
         ConfirmClearDataDialog(
             onConfirm = {
-                viewModel.clearAllData()
-                dialogs.showConfirmClearDialog = false
+                isClearingData = true
+                scope.launch {
+                    val ok = runCatching { viewModel.clearAllData() }.isSuccess
+                    isClearingData = false
+                    dialogs.showConfirmClearDialog = false
+                    AppSnackbar.show(if (ok) clearDataSuccessLabel else clearDataFailedLabel)
+                }
             },
             onDismiss = { dialogs.showConfirmClearDialog = false }
         )
     }
 
-    if (dialogs.showLogoutDialog) {
+    if (dialogs.showLogoutDialog && !isClearingData) {
         LogoutDialog(
             onKeepData = {
                 dialogs.showLogoutDialog = false
                 onPerformLogoutCleanup()
             },
             onDeleteData = {
-                dialogs.showLogoutDialog = false
-                viewModel.logoutAndDeleteAllData {
-                    onPerformLogoutCleanup()
+                isClearingData = true
+                // Tutup dialog + cleanup HANYA di onComplete (setelah hapus
+                // cloud & lokal selesai), bukan sebelum operasi dijalankan.
+                val invoked = runCatching {
+                    viewModel.logoutAndDeleteAllData {
+                        isClearingData = false
+                        dialogs.showLogoutDialog = false
+                        onPerformLogoutCleanup()
+                        AppSnackbar.show(clearDataSuccessLabel)
+                    }
+                }.isSuccess
+                if (!invoked) {
+                    isClearingData = false
+                    AppSnackbar.show(clearDataFailedLabel)
                 }
             },
             onDismiss = { dialogs.showLogoutDialog = false }

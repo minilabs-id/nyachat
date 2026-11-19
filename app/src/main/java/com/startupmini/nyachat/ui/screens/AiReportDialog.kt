@@ -8,9 +8,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,6 +34,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -41,11 +44,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.startupmini.nyachat.R
-import com.startupmini.nyachat.ui.theme.AiBlue
+import com.startupmini.nyachat.data.remote.GeminiService
 import com.startupmini.nyachat.ui.theme.LocalSemanticColors
 import kotlinx.coroutines.launch
 
@@ -65,6 +72,12 @@ fun AiReportDialog(
     )
     val scope = rememberCoroutineScope()
     val semantic = LocalSemanticColors.current
+
+    // B17: deteksi offline lewat SATU oracle di GeminiService (mencocokkan
+    // OFFLINE_REPORT_NOTICE / marker fallback). Teks banner memakai string
+    // resource persis ux_ai_offline_notice — bukan salinan literal di UI.
+    val isOfflineReport = GeminiService.isOfflineFallbackReply(reportText)
+    val offlineNotice = stringResource(R.string.ux_ai_offline_notice)
 
     // Audit motion (2026-08-12): onDismissRequest juga lewat dismiss() —
     // gesture swipe/scrim/back ikut turun ke bawah, konsisten dengan tombol.
@@ -87,7 +100,10 @@ fun AiReportDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.92f)
+                // B-M18: navbar inset manual (contentWindowInsets dinolkan),
+                // B-M21: satu batas tinggi sheet 640dp dengan sheet lain.
+                .navigationBarsPadding()
+                .heightIn(max = 640.dp)
                 .padding(horizontal = 20.dp)
         ) {
             // Custom drag handle + spacer
@@ -112,10 +128,13 @@ fun AiReportDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     // Audit warna: lingkaran icon AI pakai semantic.ai (mode-aware) —
                     // sebelumnya AiBlueLight (0xFFE3ECFF) terlalu terang di dark mode.
-                    // Tombol CTA tetap AiBlue (biru brand, kontras aman kedua mode).
+                    // Tombol CTA pakai aiAccent + aiOnContainer (B-M24).
                     Box(
                         modifier = Modifier
                             .size(38.dp)
@@ -131,17 +150,23 @@ fun AiReportDialog(
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
-                    Column {
+                    // B-M1: judul/subjudul diberi weight(1f) supaya teks panjang
+                    // tidak menimpa tombol tutup di lebar 320dp.
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.report_title),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = stringResource(R.string.report_subtitle),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -156,7 +181,9 @@ fun AiReportDialog(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            // B-M23: divider tanpa alpha — outlineVariant.copy(0.5f) terlalu
+            // samar di tema gelap.
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
 
             // Scrollable content — ruang penuh
@@ -165,6 +192,37 @@ fun AiReportDialog(
                     .weight(1f)
                     .verticalScroll(rememberScrollState())
             ) {
+                if (isOfflineReport) {
+                    // B17: banner WARNING (warna error), bukan paragraf biasa —
+                    // pembaca langsung tahu laporan ini dihitung dari data lokal.
+                    Surface(
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .testTag("ai_offline_notice")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = offlineNotice,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
                 if (isError) {
                     // Mode error: ikon + pesan jelas, bukan laporan normal.
                     Box(
@@ -182,7 +240,9 @@ fun AiReportDialog(
                     }
                 }
                 Text(
-                    text = reportText,
+                    // H1: render markdown ringan (**bold**, bullet, heading emoji)
+                    // alih-alih teks polos — tanpa dependency baru.
+                    text = buildAiReportAnnotatedString(reportText),
                     style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 24.sp),
                     color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 )
@@ -193,9 +253,17 @@ fun AiReportDialog(
                 // Problem → Action: tombol Coba Lagi memicu generate ulang.
                 Button(
                     onClick = onRetry,
-                    colors = ButtonDefaults.buttonColors(containerColor = AiBlue),
+                    // B-M24: AiBlue konstan cuma ~3.4:1 di dark mode — pakai
+                    // aiAccent mode-aware + content aiOnContainer (AA di dua mode).
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = semantic.aiAccent,
+                        contentColor = semantic.aiOnContainer
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
+                        // B-M6: jarak 12dp supaya tombol Coba Lagi tidak
+                        // menempel pada tombol Tutup di bawahnya.
+                        .padding(bottom = 12.dp)
                         .testTag("retry_ai_report_button"),
                     shape = RoundedCornerShape(14.dp)
                 ) {
@@ -211,8 +279,10 @@ fun AiReportDialog(
             if (isError) {
                 OutlinedButton(
                     onClick = ::dismiss,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AiBlue),
-                    border = BorderStroke(1.dp, AiBlue),
+                    // B21: outlined mengikuti semantic.ai (mode-aware), bukan AiBlue
+                    // konstan yang terlalu menyolok di tema gelap.
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = semantic.ai),
+                    border = BorderStroke(1.dp, semantic.ai),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 16.dp)
@@ -224,7 +294,12 @@ fun AiReportDialog(
             } else {
                 Button(
                     onClick = ::dismiss,
-                    colors = ButtonDefaults.buttonColors(containerColor = AiBlue),
+                    // B-M24: samakan dengan tombol Coba Lagi — aiAccent +
+                    // aiOnContainer (kontras AA di light & dark).
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = semantic.aiAccent,
+                        contentColor = semantic.aiOnContainer
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 16.dp)
@@ -234,6 +309,73 @@ fun AiReportDialog(
                     Text(stringResource(R.string.report_close), fontWeight = FontWeight.SemiBold)
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H1: renderer markdown ringan (internal → bisa di-unit-test tanpa Compose UI).
+// Mendukung **bold**, bullet ("•", "-", "1."), heading/emoji, dan line break.
+// ---------------------------------------------------------------------------
+
+private val NUMBERED_BULLET = Regex("^\\d+\\.\\s+")
+
+// C10: heading hanya untuk "# " eksplisit atau emoji heading yang dikenal.
+// Baris yang mulai dengan '%', '(', '+', atau '#' tanpa spasi adalah ISI
+// laporan (persentase, catatan, poin) — jangan ditebalkan seluruh barisnya.
+private val HEADING_EMOJIS = listOf("📌", "💡", "📅", "⚠️", "🚨", "💰", "✅", "📊")
+
+private fun isAiReportHeading(line: String): Boolean =
+    line.startsWith("# ") || HEADING_EMOJIS.any(line::startsWith)
+
+/** Pisahkan penanda bullet dari isi baris; null bila baris bukan bullet. */
+private fun splitBulletMarker(line: String): Pair<String, String>? {
+    if (line.startsWith("• ")) return "• " to line.substring(2)
+    if (line.startsWith("- ")) return "- " to line.substring(2)
+    val numbered = NUMBERED_BULLET.find(line)
+    if (numbered != null) return numbered.value to line.substring(numbered.range.last + 1)
+    return null
+}
+
+/** Tulis inline markdown: pasangan `**...**` jadi bold; [forceBold] untuk heading. */
+private fun AnnotatedString.Builder.appendInlineMarkdown(source: String, forceBold: Boolean) {
+    val bold = SpanStyle(fontWeight = FontWeight.Bold)
+    var cursor = 0
+    while (cursor < source.length) {
+        if (source.startsWith("**", cursor)) {
+            val end = source.indexOf("**", cursor + 2)
+            if (end != -1) {
+                withStyle(bold) { append(source.substring(cursor + 2, end)) }
+                cursor = end + 2
+                continue
+            }
+        }
+        val next = source.indexOf("**", cursor + 1)
+        val stop = if (next == -1) source.length else next
+        val chunk = source.substring(cursor, stop)
+        if (forceBold) withStyle(bold) { append(chunk) } else append(chunk)
+        cursor = stop
+    }
+}
+
+/**
+ * H1 — ubah teks laporan AI menjadi [AnnotatedString] dengan:
+ * - `**teks**` → `SpanStyle(fontWeight = FontWeight.Bold)`,
+ * - baris bullet (`•`/`-`/`1.`) → penanda ditebalkan,
+ * - baris heading/emoji → seluruh baris ditebalkan,
+ * - satu `\n` per baris (line break rapi, tidak ada markdown mentah).
+ */
+internal fun buildAiReportAnnotatedString(text: String): AnnotatedString = buildAnnotatedString {
+    text.lines().forEachIndexed { index, line ->
+        if (index > 0) append('\n')
+        val trimmed = line.trimStart()
+        if (trimmed.isEmpty()) return@forEachIndexed
+        val marker = splitBulletMarker(trimmed)
+        if (marker != null) {
+            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(marker.first) }
+            appendInlineMarkdown(marker.second, forceBold = false)
+        } else {
+            appendInlineMarkdown(trimmed, forceBold = isAiReportHeading(trimmed))
         }
     }
 }

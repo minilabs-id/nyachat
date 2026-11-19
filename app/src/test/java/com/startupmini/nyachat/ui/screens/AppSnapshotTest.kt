@@ -1,22 +1,34 @@
 package com.startupmini.nyachat.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.data.local.ChatMessage
 import com.startupmini.nyachat.data.local.FinancialTransaction
+import com.startupmini.nyachat.data.remote.ReceiptStats
 import com.startupmini.nyachat.data.remote.SyncStatus
 import com.startupmini.nyachat.ui.theme.CategoryColorsLight
 import com.startupmini.nyachat.ui.theme.CoupleFinanceTheme
@@ -33,6 +45,10 @@ import org.robolectric.annotation.GraphicsMode
  * `app/src/test/snapshots/`; rekam ulang via
  * `./gradlew :app:recordRoborazziDebug`, verifikasi via
  * `./gradlew :app:verifyRoborazziDebug`.
+ *
+ * Catatan D-L4: font brand Plus Jakarta Sans dimuat via Downloadable Fonts
+ * (GMS) — di Robolectric/CI tidak tersedia sehingga golden merepresentasikan
+ * font sistem. Jangan bandingkan piksel lintas OS tanpa re-record di CI.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -43,15 +59,36 @@ class AppSnapshotTest {
     val composeRule = createComposeRule()
 
     private fun capture(name: String, content: @Composable () -> Unit) {
+        captureWithFontScale(name, fontScale = 1f, content = content)
+    }
+
+    /**
+     * Helper untuk variasi fontScale (B-M1/M2/M7/M8/M9/M12/M19).
+     * Menimpa [Density.fontScale] lewat CompositionLocalProvider — tidak
+     * mengubah qualifier `@Config` supaya ukuran perangkat tetap w411dp.
+     */
+    private fun captureWithFontScale(
+        name: String,
+        fontScale: Float,
+        content: @Composable () -> Unit
+    ) {
         composeRule.setContent {
             CoupleFinanceTheme {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.background)
-                        .padding(8.dp)
+                val density = LocalDensity.current
+                CompositionLocalProvider(
+                    LocalDensity provides Density(
+                        density = density.density,
+                        fontScale = fontScale
+                    )
                 ) {
-                    content()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background)
+                            .padding(8.dp)
+                    ) {
+                        content()
+                    }
                 }
             }
         }
@@ -317,4 +354,202 @@ class AppSnapshotTest {
             )
         }
     }
+
+    // ── Helper test composable (production tetap tidak diubah visibilitasnya) ──
+
+    /**
+     * PinConnectScreen step-2 (PIN tergenerate) tidak bisa dirender langsung
+     * tanpa state Google/auto-connect, jadi kami render ulang Text PIN-nya
+     * dengan style persis (B-H1: displayMedium + ExtraBold + letterSpacing 8.sp).
+     */
+    @Composable
+    private fun GeneratedPinText(pin: String) {
+        Text(
+            text = pin,
+            style = MaterialTheme.typography.displayMedium,
+            fontWeight = FontWeight.ExtraBold,
+            color = MaterialTheme.colorScheme.primary,
+            letterSpacing = 8.sp
+        )
+    }
+
+    /**
+     * `MessageStatusIndicators` adalah `private` di ChatBubbles.kt — jalur resmi
+     * satu-satunya adalah lewat [ChatMessageBubble] publik (delivery + receiptStats),
+     * jadi wrapper di sini memanggil bubble tersebut, bukan mengubah visibility
+     * produksi. Menangkap pending / read / rainbow (deretan titik + pelangi).
+     */
+    @Composable
+    private fun MessageStatusIndicatorsWrapper(
+        delivery: DeliveryStatus?,
+        receiptStats: ReceiptStats?
+    ) {
+        ChatMessageBubble(
+            message = ChatMessage(
+                sender = "Suami",
+                messageText = "Oke, sudah kubayar",
+                timestamp = 1_783_800_000_000L
+            ),
+            currentActiveSender = "Suami",
+            delivery = delivery,
+            receiptStats = receiptStats
+        )
+    }
+
+    /**
+     * Replika container sheet `ManageMembersScreen` (Box fillMaxWidth +
+     * widthIn(max=600dp)). Layar asli bergantung pada FirebaseAuth di
+     * `MembershipManager.currentUid()` sehingga tidak aman dirender di unit test
+     * tanpa inisialisasi Firebase. TODO: ganti ke `ManageMembersScreen(...)` bila
+     * dependency sudah bisa di-inject / Firebase-aware test harness tersedia.
+     * Golden ini mengunci geometri centering B-H2 pada lebar tablet 840dp.
+     */
+    @Composable
+    private fun ManageMembersTabletReplica() {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            Column(modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Kelola Anggota",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                repeat(4) { index ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                text = "Anggota ${index + 1}",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                text = "anggota${index + 1}@example.com",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Golden BARU (15 test lama di atas sengaja tidak diubah) ──
+
+    @Test
+    fun `pin step 2 dengan PIN delapan digit`() {
+        // B-H1: PIN 8 digit + letterSpacing 8.sp di w411dp (base coverage).
+        capture("pin_step2_generated") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f))
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                GeneratedPinText(pin = "48291370")
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w840dp-h1180dp")
+    fun `sheet kelola anggota pada lebar tablet`() {
+        // B-H2: container widthIn(600dp) harus ter-center, bukan menempel kiri.
+        capture("manage_members_tablet") {
+            ManageMembersTabletReplica()
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h640dp")
+    fun `bubble chat pada 320dp dengan fontScale 1 5`() {
+        val msg = ChatMessage(
+            sender = "Suami",
+            messageText = "Beli nasi padang 50.000",
+            timestamp = 1_783_800_000_000L,
+            isFinancial = true,
+            detectedAmount = 50_000.0,
+            detectedCategory = "Makanan & Minuman",
+            detectedType = Constants.TransactionTypes.EXPENSE
+        )
+        captureWithFontScale("chat_bubble_w320_font15", fontScale = 1.5f) {
+            ChatMessageBubble(message = msg, currentActiveSender = "Suami")
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h640dp")
+    fun `topbar pada 320dp dengan fontScale 1 5`() {
+        // B-M19: subtitle tanpa weight/ellipsis menimpa aksi di layar sempit.
+        captureWithFontScale("topbar_two_online_w320_font15", fontScale = 1.5f) {
+            MainTopBar(
+                onlineMemberNames = listOf("Ari", "Budi"),
+                totalMembers = 6,
+                userName = "Ari",
+                memberAvatarPaths = emptyMap(),
+                familyName = "Keuangan Bersama",
+                onManageMembers = {},
+                onSettings = {}
+            )
+        }
+    }
+
+    @Test
+    fun `indikator status pesan pending`() {
+        capture("message_status_pending") {
+            MessageStatusIndicatorsWrapper(
+                delivery = DeliveryStatus.PENDING,
+                receiptStats = null
+            )
+        }
+    }
+
+    @Test
+    fun `indikator status pesan dibaca`() {
+        capture("message_status_read") {
+            MessageStatusIndicatorsWrapper(
+                delivery = DeliveryStatus.SYNCED,
+                receiptStats = ReceiptStats(delivered = 2, read = 1, totalOthers = 2)
+            )
+        }
+    }
+
+    @Test
+    fun `indikator status pesan semua dibaca pelangi`() {
+        capture("message_status_rainbow") {
+            MessageStatusIndicatorsWrapper(
+                delivery = DeliveryStatus.DELIVERED,
+                receiptStats = ReceiptStats(delivered = 2, read = 2, totalOthers = 2, allRead = true)
+            )
+        }
+    }
+
+    @Test
+    fun `kartu insight AI mode offline`() {
+        // B17: banner transparansi saat tidak ada jalur AI aktif.
+        capture("ai_insights_offline") {
+            InsightsAiCard(
+                insights = listOf("Pengeluaran bulan ini naik 12% dari bulan lalu."),
+                isAuditLoading = false,
+                onGenerateAudit = {},
+                isMonthlyLoading = false,
+                onGenerateMonthly = {},
+                isOffline = true
+            )
+        }
+    }
+
+    // TODO golden (butuh harness Firestore / Firebase, bukan sekadar Composable):
+    //  - E2EE banner states (checking / preparing / active / error) — statusnya
+    //    di-read dari E2eeSyncManager.status di dalam ChatScreen, belum injectable.
+    //  - AiReportDialog mode offline & error (ModalBottomSheet + GeminiService) —
+    //    render sheet di Robolectric belum stabil; pakai ai_insights_offline di atas
+    //    untuk state offline, dan tambahkan golden error setelah harness siap.
 }

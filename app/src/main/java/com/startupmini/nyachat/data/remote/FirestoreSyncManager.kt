@@ -8,6 +8,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.storage.StorageMetadata
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.data.backup.DataExporter
 import com.startupmini.nyachat.data.crypto.WorkspaceCrypto
@@ -137,6 +138,19 @@ internal enum class SendMode { PLAINTEXT, ENCRYPT, BLOCK }
 internal fun sendMode(active: Boolean, ready: Boolean): SendMode = when {
     !active -> SendMode.PLAINTEXT
     ready -> SendMode.ENCRYPT
+    else -> SendMode.BLOCK
+}
+
+/**
+ * Audit M9: status E2EE belum terselesaikan (marker belum dibaca saat startup)
+ * harus dianggap BLOCK, BUKAN PLAINTEXT. `sendMode(active, ready)` dipertahankan
+ * apa adanya untuk kompatibilitas test; semua jalur kirim produksi memakai fungsi
+ * ini agar tidak ada jendela pesan plaintext sebelum status E2EE diketahui.
+ */
+internal fun currentSendMode(): SendMode = when {
+    E2eeSyncManager.activationState == E2eeSyncManager.ActivationState.UNKNOWN -> SendMode.BLOCK
+    !E2eeSyncManager.isActive() -> SendMode.PLAINTEXT
+    E2eeSyncManager.isReady() -> SendMode.ENCRYPT
     else -> SendMode.BLOCK
 }
 
@@ -786,7 +800,15 @@ object FirestoreSyncManager {
             return null
         }
         val enc = c.enc ?: run { missedEncryptedMessages.add(c.cloudId); return null }
-        val plain = WorkspaceCrypto.decryptContent(key, enc) ?: run {
+        // Audit L1: AAD mengikat ciphertext ke family/cloudId/pengirim/versi.
+        // decryptContentForSync otomatis fallback ke format legacy tanpa AAD.
+        val plain = E2eeSyncManager.decryptContentForSync(
+            key, enc,
+            aadFamilyId = familyId,
+            aadCloudId = c.cloudId,
+            aadSenderUid = c.senderUid ?: c.sender,
+            aadMsgVersion = c.msgVersion
+        ) ?: run {
             Log.w(TAG, "Dekripsi pesan ${c.cloudId} gagal (kunci tidak cocok?)")
             return null
         }
@@ -827,7 +849,12 @@ object FirestoreSyncManager {
             receiptsRef().document(cloudId).set(
                 mapOf(
                     Constants.Fields.RECEIPT_DELIVERED_BY to FieldValue.arrayUnion(uid),
-                    Constants.Fields.RECEIPT_READ_BY to emptyList<String>(),
+                    // Audit M11: JANGAN tulis readBy di sini. Dulu field ini di-set
+                    // ke [] dengan merge, sehingga begitu ada anggota yang markRead()
+                    // (arrayUnion), ACK anggota lain DITOLAK rules grow-only
+                    // (firestore.rules: readBy.size() tidak boleh menyusut) →
+                    // deliveredBy berhenti bertambah & status ✓✓/pelangi salah.
+                    // Status baca sepenuhnya ditulis oleh markRead().
                     // Pengirim dipakai cloud function cleanupReceipt untuk
                     // menentukan "semua ANGGOTA LAIN sudah baca" (pengirim tidak
                     // pernah menandai pesannya sendiri dibaca).
@@ -978,7 +1005,14 @@ object FirestoreSyncManager {
             Log.w(TAG, "Transaksi terenkripsi ${c.cloudId} ditunda (grup key belum siap)")
             return null
         }
-        val plain = WorkspaceCrypto.decryptContent(key, c.enc ?: "") ?: run {
+        // Audit L1: AAD transaksi (fallback legacy otomatis di decryptContentForSync).
+        val plain = E2eeSyncManager.decryptContentForSync(
+            key, c.enc ?: "",
+            aadFamilyId = familyId,
+            aadCloudId = c.cloudId,
+            aadSenderUid = c.loggedBy,
+            aadMsgVersion = c.msgVersion
+        ) ?: run {
             Log.w(TAG, "Dekripsi transaksi ${c.cloudId} gagal (kunci tidak cocok?)")
             return null
         }
@@ -1060,7 +1094,7 @@ object FirestoreSyncManager {
             // diam-diam ke plaintext. Keputusan berbasis marker server
             // (isActive), bukan isReady — member yang baru start tidak boleh
             // mengirim plaintext hanya karena marker listener belum menembak.
-            val e2eeKey = when (sendMode(E2eeSyncManager.isActive(), E2eeSyncManager.isReady())) {
+            val e2eeKey = when (currentSendMode()) {
                 SendMode.ENCRYPT -> E2eeSyncManager.currentGroupKey()
                 SendMode.PLAINTEXT -> null
                 SendMode.BLOCK -> {
@@ -1069,6 +1103,8 @@ object FirestoreSyncManager {
                     return false
                 }
             }
+            // Audit L1: uid penulis dipakai juga sebagai AAD ciphertext.
+            val senderUidValue = message.senderUid ?: uid()
             // Metadata selalu plaintext (dibutuhkan sinkronisasi & routing tanpa
             // dekripsi): sender, senderUid, timestamp, imageUrl, editedAt, versi.
             val metadata = nonNullMap(
@@ -1078,7 +1114,7 @@ object FirestoreSyncManager {
                 // (anggota tidak bisa mengatasnamakan orang lain) & FCM
                 // self-skip presisi per-uid. Pesan lama/restore yang belum punya
                 // senderUid diisi uid penulis saat ini (penulis ulang sah).
-                Constants.Fields.SENDER_UID to (message.senderUid ?: uid()),
+                Constants.Fields.SENDER_UID to senderUidValue,
                 Constants.Fields.TIMESTAMP to message.timestamp,
                 Constants.Fields.IMAGE_URL to imageUrl,
                 // M4: penanda waktu SERVER — sampai di sini setiap perubahan
@@ -1090,9 +1126,13 @@ object FirestoreSyncManager {
                 // r1.7.0 (E2EE): seluruh KONTEN dienkripsi (teks, hasil AI, reply).
                 // Server hanya melihat ciphertext `enc` + metadata di atas.
                 metadata + mapOf(
-                    Constants.Fields.ENC to WorkspaceCrypto.encryptContent(
+                    Constants.Fields.ENC to E2eeSyncManager.encryptContentForSync(
                         e2eeKey,
-                        DataExporter.messageToJson(message).toString().toByteArray()
+                        DataExporter.messageToJson(message).toString().toByteArray(),
+                        aadFamilyId = familyId,
+                        aadCloudId = cid,
+                        aadSenderUid = senderUidValue,
+                        aadMsgVersion = Constants.MsgVersion.ENCRYPTED
                     ),
                     Constants.Fields.MSG_VERSION to Constants.MsgVersion.ENCRYPTED
                 )
@@ -1143,7 +1183,7 @@ object FirestoreSyncManager {
         return try {
             val path = "${Constants.Collections.FAMILIES}/${familyId}/${Constants.Collections.MESSAGES}/$cloudId.jpg"
             val ref = storage().getReference(path)
-            val groupKey = when (sendMode(E2eeSyncManager.isActive(), E2eeSyncManager.isReady())) {
+            val groupKey = when (currentSendMode()) {
             SendMode.ENCRYPT -> E2eeSyncManager.currentGroupKey()
             SendMode.PLAINTEXT -> null
             SendMode.BLOCK -> {
@@ -1152,13 +1192,19 @@ object FirestoreSyncManager {
                 return null
             }
         }
+        // Audit L10: metadata uploaderUid dipakai storage.rules untuk membatasi
+        // hapus foto hanya oleh pengunggah (atau owner workspace).
+        val meta = StorageMetadata.Builder()
+            .setContentType("image/jpeg")
+            .setCustomMetadata("uploaderUid", uid().orEmpty())
+            .build()
         if (groupKey != null) {
                 val encrypted = WorkspaceCrypto.encryptBytes(groupKey, file.readBytes())
-                ref.putBytes(encrypted).await()
+                ref.putBytes(encrypted, meta).await()
             } else {
                 // Legacy (belum terenkripsi) — tetap JPEG murni supaya device
                 // lama & foto lama kompatibel.
-                ref.putFile(android.net.Uri.fromFile(file)).await()
+                ref.putFile(android.net.Uri.fromFile(file), meta).await()
             }
             path
         } catch (e: Exception) {
@@ -1235,7 +1281,7 @@ object FirestoreSyncManager {
             // ciphertext `enc`; Rekap dihitung lokal di setiap perangkat dari
             // Room (yang tetap polos). Legacy plaintext untuk kompatibilitas.
             // r1.7.1: BLOCK saat aktif tapi kunci belum siap (jangan plaintext).
-            val e2eeKey = when (sendMode(E2eeSyncManager.isActive(), E2eeSyncManager.isReady())) {
+            val e2eeKey = when (currentSendMode()) {
                 SendMode.ENCRYPT -> E2eeSyncManager.currentGroupKey()
                 SendMode.PLAINTEXT -> null
                 SendMode.BLOCK -> {
@@ -1248,15 +1294,26 @@ object FirestoreSyncManager {
                 Constants.Fields.CLOUD_ID to cid,
                 Constants.Fields.TIMESTAMP to transaction.timestamp,
                 Constants.Fields.EDITED_AT to transaction.editedAt,
+                // M3/AAD: wajib disimpan — decryptCloudTransaction memakai
+                // loggedBy sebagai aadSenderUid. Tanpa ini AAD tidak cocok dan
+                // SELURUH transaksi terenkripsi gagal didekripsi.
+                Constants.Fields.LOGGED_BY to transaction.loggedBy,
+                // M3: authorUid dipakai rules untuk mengizinkan non-owner
+                // mengubah/menghapus transaksinya sendiri.
+                Constants.Fields.AUTHOR_UID to uid(),
                 // M4: penanda waktu SERVER — resolusi konflik deterministik lintas
                 // perangkat tanpa bergantung kalibrasi jam lokal.
                 Constants.Fields.SERVER_UPDATED_AT to FieldValue.serverTimestamp()
             )
             val payload = if (e2eeKey != null) {
                 metadata + mapOf(
-                    Constants.Fields.ENC to WorkspaceCrypto.encryptContent(
+                    Constants.Fields.ENC to E2eeSyncManager.encryptContentForSync(
                         e2eeKey,
-                        DataExporter.transactionToJson(transaction).toString().toByteArray()
+                        DataExporter.transactionToJson(transaction).toString().toByteArray(),
+                        aadFamilyId = familyId,
+                        aadCloudId = cid,
+                        aadSenderUid = transaction.loggedBy,
+                        aadMsgVersion = Constants.MsgVersion.ENCRYPTED
                     ),
                     Constants.Fields.MSG_VERSION to Constants.MsgVersion.ENCRYPTED
                 )
@@ -1399,16 +1456,36 @@ object FirestoreSyncManager {
         }
     }
 
-    /** Hapus dokumen sebuah koleksi yang id-nya tidak termasuk isi backup, per batch 400. */
+    /**
+     * Hapus dokumen sebuah koleksi yang id-nya tidak termasuk isi backup, per batch 400.
+     * Dipaginasi (limit+loop) agar koleksi besar tidak terpangkas oleh satu get()
+     * tanpa pagination, yang bisa meninggalkan dokumen lama di cloud setelah restore.
+     */
     private suspend fun deleteDocsAbsentFrom(
         ref: com.google.firebase.firestore.CollectionReference,
-        keptCloudIds: Set<String>
+        keptCloudIds: Set<String>,
+        maxPages: Int = 1_000
     ) {
-        val docIds = ref.get().await().documents.map { it.id }
-        idsAbsentFromBackup(docIds, keptCloudIds).chunked(400).forEach { chunk ->
-            val batch = db().batch()
-            chunk.forEach { id -> batch.delete(ref.document(id)) }
-            batch.commit().await()
+        var pages = 0
+        while (pages < maxPages) {
+            val docs = ref.limit(500).get().await().documents
+            if (docs.isEmpty()) break
+            val staleIds = idsAbsentFromBackup(docs.map { it.id }, keptCloudIds)
+            if (staleIds.isNotEmpty()) {
+                staleIds.chunked(400).forEach { chunk ->
+                    val batch = db().batch()
+                    chunk.forEach { id -> batch.delete(ref.document(id)) }
+                    batch.commit().await()
+                }
+            }
+            // Jika tidak ada yang dihapus pada halaman ini, seluruh halaman adalah
+            // data yang harus dipertahankan; hentikan agar tidak loop selamanya
+            // pada koleksi yang isinya semua termasuk backup.
+            if (staleIds.isEmpty()) break
+            pages++
+        }
+        if (pages >= maxPages) {
+            Log.w(TAG, "Hapus dokumen di luar backup ${ref.path} berhenti di batas halaman ($maxPages)")
         }
     }
 

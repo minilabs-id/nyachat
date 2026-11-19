@@ -1,6 +1,6 @@
 package com.startupmini.nyachat.ui.screens
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,16 +18,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Tooltip
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,6 +72,8 @@ fun MainTopBar(
         title = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
+                // B-M19: TopAppBar sudah memberi slot title lebar penuh; bobot
+                // pada Column (di RowScope) yang menyusut sebelum menimpa actions.
                 modifier = Modifier.padding(start = 0.dp)
             ) {
                 StackedAvatars(
@@ -76,7 +81,7 @@ fun MainTopBar(
                     avatarPaths = memberAvatarPaths,
                     modifier = Modifier.padding(end = 10.dp)
                 )
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         // r1.6.0: nama workspace aktif; fallback default bila doc
                         // keluarga belum sempat ter-snapshot (bootstrap).
@@ -90,7 +95,10 @@ fun MainTopBar(
                         Text(
                             text = stringResource(R.string.topbar_online_count, onlineMemberNames.size, totalMembers),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // B-M19: subtitle ikut terpotong, tidak menimpa ikon aksi.
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     } else if (onlineMemberNames.size == 1) {
                         Text(
@@ -105,19 +113,47 @@ fun MainTopBar(
             }
         },
         actions = {
-            IconButton(onClick = onManageMembers) {
-                Icon(
-                    imageVector = Icons.Rounded.Group,
-                    contentDescription = stringResource(R.string.manage_members_title),
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
+            // L8: tooltip pada aksi ikon — label muncul saat hover/long-press.
+            // C18: isi tooltip TIDAK boleh jadi node TalkBack terpisah — label
+            // sudah dibawa IconButton lewat contentDescription. Bersihkan
+            // semantics teks tooltip agar tidak ada pengumuman dobel.
+            Tooltip(
+                text = {
+                    Text(
+                        stringResource(R.string.manage_members_title),
+                        modifier = Modifier.clearAndSetSemantics {}
+                    )
+                }
+            ) {
+                IconButton(
+                    onClick = onManageMembers,
+                    modifier = Modifier.testTag("topbar_manage_members")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Group,
+                        contentDescription = stringResource(R.string.manage_members_title),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
-            IconButton(onClick = onSettings) {
-                Icon(
-                    imageVector = Icons.Rounded.Settings,
-                    contentDescription = stringResource(R.string.action_settings),
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
+            Tooltip(
+                text = {
+                    Text(
+                        stringResource(R.string.action_settings),
+                        modifier = Modifier.clearAndSetSemantics {}
+                    )
+                }
+            ) {
+                IconButton(
+                    onClick = onSettings,
+                    modifier = Modifier.testTag("topbar_settings")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Settings,
+                        contentDescription = stringResource(R.string.action_settings),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -163,7 +199,9 @@ private fun StackedAvatars(
                     photoPath = photoPath,
                     modifier = Modifier
                         .offset(x = (index * (avatarSize - overlapDp)).dp)
-                        .zIndex((show.size - index).toFloat()),
+                        .zIndex((show.size - index).toFloat())
+                        // B-L: samakan cincin avatar foto dengan inisial.
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
                     backgroundColor = avatarColorFor(name),
                     textStyle = MaterialTheme.typography.labelMedium
                 )
@@ -179,16 +217,12 @@ private fun StackedAvatars(
                         .offset(x = (index * (avatarSize - overlapDp)).dp)
                         .zIndex((show.size - index).toFloat())
                         .clip(CircleShape)
-                        .drawBehind { drawCircle(color = avatarColor) },
+                        .drawBehind { drawCircle(color = avatarColor) }
+                        // B-L: ganti overlay putih (terlihat sebagai "white ring"
+                        // dan hilang di dark) dengan border outlineVariant tema.
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    // White border ring
-                    Box(
-                        modifier = Modifier
-                            .size(avatarSize.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.25f))
-                    )
                     Text(
                         text = initials,
                         color = fgColor,

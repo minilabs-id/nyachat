@@ -13,6 +13,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.NumberFormat
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -480,14 +481,32 @@ object GeminiService {
         return@withContext buildOfflineAuditReport(insights, balance)
     }
 
+    // M6: GeminiService bukan Composable → salin persis teks
+    // R.string.ux_ai_offline_notice (jangan ubah strings.xml).
+    // B17: internal (bukan private) supaya lapisan UI bisa mencocokkan penanda
+    // ini lewat isOfflineFallbackReply() tanpa meng-hardcode ulang literal.
+    internal const val OFFLINE_REPORT_NOTICE =
+        "Mode AI sedang offline — laporan ini dihitung dari data lokal."
+
+    /** M6: prefix transparansi pada laporan fallback (audit/offline bulanan). */
+    private fun offlineNoticePrefix(): String = "⚠️ $OFFLINE_REPORT_NOTICE\n\n"
+
+    /** M3: Rupiah dengan pemisah ribuan id-ID, tanpa desimal ("28.090.901"). */
+    private fun reportNumber(value: Double): String =
+        NumberFormat.getNumberInstance(Locale("id", "ID")).apply {
+            maximumFractionDigits = 0
+        }.format(value)
+
     /** Laporan offline yang merujuk insight data nyata (audit #7). */
     private fun buildOfflineAuditReport(
         ins: com.startupmini.nyachat.data.analytics.FinancialInsights,
         balance: Double
     ): String {
         val sb = StringBuilder()
+        // M6: beri tahu pembaca bahwa laporan ini dihitung lokal (transparansi).
+        sb.append(offlineNoticePrefix())
         sb.appendLine("📌 **Evaluasi & Analisis Arus Kas**")
-        sb.appendLine("• **Arus Kas**: Pemasukan Rp ${ins.totalIncome.toLong()} vs Pengeluaran Rp ${ins.totalExpense.toLong()} (Saldo: Rp ${balance.toLong()}).")
+        sb.appendLine("• **Arus Kas**: Pemasukan Rp ${reportNumber(ins.totalIncome)} vs Pengeluaran Rp ${reportNumber(ins.totalExpense)} (Saldo: Rp ${reportNumber(balance)}).")
         when {
             ins.totalExpense > ins.totalIncome && ins.totalIncome > 0 ->
                 sb.appendLine("• **Tinjauan**: Pengeluaran melampaui pemasukan (rasio ${(ins.expenseRate * 100).toInt()}%). Perlu pengetatan. 🚨")
@@ -497,19 +516,19 @@ object GeminiService {
                 sb.appendLine("• **Tinjauan**: Arus kas cukup pas (tabungan ~${(ins.savingsRate * 100).toInt()}%). Waspada perubahan tak terduga.")
         }
         ins.topExpenseCategory?.let { cat ->
-            sb.appendLine("• **Pos terbesar**: $cat (Rp ${ins.topExpenseAmount.toLong()}, ${(ins.topExpensePct * 100).toInt()}% pengeluaran).")
+            sb.appendLine("• **Pos terbesar**: $cat (Rp ${reportNumber(ins.topExpenseAmount)}, ${(ins.topExpensePct * 100).toInt()}% pengeluaran).")
         }
         ins.biggestSingleDesc?.let { desc ->
-            sb.appendLine("• **Transaksi tunggal terbesar**: \"$desc\" (Rp ${ins.biggestSingleAmount.toLong()}).")
+            sb.appendLine("• **Transaksi tunggal terbesar**: \"$desc\" (Rp ${reportNumber(ins.biggestSingleAmount)}).")
         }
         sb.appendLine("• **Tren**: Pengeluaran ${com.startupmini.nyachat.data.analytics.FinancialInsightsEngine.trendText(ins.expenseChangePct)} dalam 30 hari.")
         if (ins.topSpender != null) {
-            sb.appendLine("• **Pengeluaran terbesar**: ${ins.topSpender} (Rp ${ins.topSpenderAmount.toLong()}).")
+            sb.appendLine("• **Pengeluaran terbesar**: ${ins.topSpender} (Rp ${reportNumber(ins.topSpenderAmount)}).")
         }
 
         sb.appendLine("")
         sb.appendLine("💡 **Rekomendasi Strategis**")
-        sb.appendLine("1. **Kendalikan pos terbesar (${ins.topExpenseCategory ?: "operasional"})**: pasang plafon mingguan ±Rp ${((ins.topExpenseAmount * 0.9) / 4).toLong()} agar pengeluaran turun.")
+        sb.appendLine("1. **Kendalikan pos terbesar (${ins.topExpenseCategory ?: "operasional"})**: pasang plafon mingguan ±Rp ${reportNumber((ins.topExpenseAmount * 0.9) / 4)} agar pengeluaran turun.")
         val savingsTarget = if (ins.savingsRate > 0) {
             ((ins.savingsRate + 0.05) * 100).toInt().coerceAtMost(30)
         } else {
@@ -537,7 +556,7 @@ object GeminiService {
         val monthLines = monthly.joinToString("\n") { m ->
             val top = com.startupmini.nyachat.data.analytics.MonthlyAnalytics
                 .topExpenseCategory(m, transactions)
-            "- ${m.label}: Pemasukan Rp ${m.income.toLong()}, Pengeluaran Rp ${m.expense.toLong()}, Saldo Rp ${m.balance.toLong()}" +
+            "- ${m.label}: Pemasukan Rp ${reportNumber(m.income)}, Pengeluaran Rp ${reportNumber(m.expense)}, Saldo Rp ${reportNumber(m.balance)}" +
                 (if (top != null) " (pos terbesar: $top)" else "")
         }
 
@@ -593,6 +612,8 @@ object GeminiService {
         transactions: List<FinancialTransaction>
     ): String {
         val sb = StringBuilder()
+        // M6: transparansi sumber laporan offline.
+        sb.append(offlineNoticePrefix())
         sb.appendLine("📅 **Rekap Keuangan Bulanan**")
         monthly.forEachIndexed { i, m ->
             val top = com.startupmini.nyachat.data.analytics.MonthlyAnalytics
@@ -605,7 +626,7 @@ object GeminiService {
                     else -> ""
                 }
             } else ""
-            sb.appendLine("- **${m.label}**: Pemasukan **Rp ${m.income.toLong()}**, Pengeluaran **Rp ${m.expense.toLong()}**, Saldo **Rp ${m.balance.toLong()}**$trend")
+            sb.appendLine("- **${m.label}**: Pemasukan **Rp ${reportNumber(m.income)}**, Pengeluaran **Rp ${reportNumber(m.expense)}**, Saldo **Rp ${reportNumber(m.balance)}**$trend")
             if (top != null) sb.appendLine("  - Pos terbesar: $top")
         }
         val newest = monthly.first()
@@ -673,8 +694,17 @@ object GeminiService {
      */
     internal const val OFFLINE_REPLY_MARKER = "mode AI sedang offline"
 
-    /** True kalau teks memuat penanda balasan offline (marker tunggal). */
-    internal fun isOfflineFallbackReply(text: String): Boolean = text.contains(OFFLINE_REPLY_MARKER)
+    /**
+     * True kalau teks memuat penanda balasan offline.
+     *
+     * B17: oracle SATU ini dipakai juga untuk laporan (audit/bulanan). Prefix
+     * laporan offline diawali "⚠️ " + [OFFLINE_REPORT_NOTICE] (huruf kapital),
+     * sedangkan [OFFLINE_REPLY_MARKER] huruf kecil — perbandingan
+     * case-insensitive membuat kedua jalur terdeteksi tanpa duplikasi literal.
+     */
+    internal fun isOfflineFallbackReply(text: String): Boolean =
+        text.contains(OFFLINE_REPLY_MARKER, ignoreCase = true) ||
+            text.contains(OFFLINE_REPORT_NOTICE, ignoreCase = true)
 
     internal fun offlineChatReply(prompt: String): String {
         val lower = prompt.lowercase()
@@ -825,7 +855,9 @@ object GeminiService {
     }
 
     private fun callGeminiApi(prompt: String, apiKey: String, imagePath: String? = null): String {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL_NAME:generateContent?key=$apiKey"
+        // Audit L4: kunci BYOK dikirim lewat HEADER (x-goog-api-key), bukan query
+        // string URL — query string berisiko masuk access log/proxy.
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL_NAME:generateContent"
 
         val contentsArray = JSONArray().apply {
             put(JSONObject().apply {
@@ -859,6 +891,7 @@ object GeminiService {
         val requestBody = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         val request = Request.Builder()
             .url(url)
+            .header("x-goog-api-key", apiKey)
             .post(requestBody)
             .build()
 

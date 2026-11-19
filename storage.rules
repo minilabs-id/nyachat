@@ -18,18 +18,43 @@ service firebase.storage {
         return request.auth != null
           && firestore.exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
       }
+      // L10 (audit): owner dibaca dari role member doc user sendiri.
+      function isOwner() {
+        return isMember()
+          && firestore.get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role == 'owner';
+      }
+      // L10 (audit): objek FOTO harus benar-benar meng-back dokumen pesan yang
+      // ada. Penamaan klien (FirestoreSyncManager.uploadMessageImage):
+      //   families/{PIN}/messages/{cloudId}.jpg  →  docId = fileName tanpa ".jpg".
+      // `replace('[.]jpg$', '')` menghasilkan cloudId dari object name.
       // Foto diunggah dari klien. Sejak E2EE aktif (r1.7.0) blob foto diENKRIPSI
       // (AES-GCM, mulai IV acak) → contentType application/octet-stream, bukan
       // image/* lagi — server hanya menyimpan ciphertext. Blob lama (sebelum
       // aktivasi) tetap image/jpeg. Dua-duanya diizinkan; batas ukuran: kompresi
       // klien ImageFileUtil maks ~1280px/JPEG 82 (<1MB terenkripsi); 5MB memberi
       // ruang aman tanpa memicu quota tak wajar.
-      allow read: if isMember();
+      allow read: if isMember()
+        && fileName.matches('^[A-Za-z0-9_-]+[.]jpg$')
+        && firestore.exists(/databases/$(database)/documents/families/$(familyId)/messages/$(fileName.replace('[.]jpg$', '')));
+      // Hanya CREATE — path deterministik (upload ulang = create idempoten),
+      // tidak ada `allow update` supaya objek tidak bisa ditimpa paksa.
+      // Catatan: klien mengunggah foto SEBELUM menulis doc pesan (path imageUrl
+      // deterministik), jadi keharusan `firestore.exists(doc pesan)` pada CREATE
+      // akan menolak upload pertama. Pengecekan backing-doc tetap dipertahankan
+      // pada READ; CREATE dijaga membership + pola nama + metadata uploader.
       allow create: if isMember()
+        && fileName.matches('^[A-Za-z0-9_-]+[.]jpg$')
+        && request.resource.metadata.uploaderUid == request.auth.uid
         && request.resource.size <= 5 * 1024 * 1024
         && (request.resource.contentType.matches('image/.*')
             || request.resource.contentType == 'application/octet-stream');
-      allow delete: if isMember();
+      // L10 (audit): hapus hanya uploader (metadata.uploaderUid) atau owner
+      // workspace. Akses metadata dijaga `in` agar tidak error jika field
+      // belum ada pada objek lama.
+      allow delete: if isMember()
+        && (('uploaderUid' in resource.metadata
+             && resource.metadata.uploaderUid == request.auth.uid)
+            || isOwner());
     }
 
     // Segala path lain di luar families/{PIN}/messages TIDAK boleh diakses —

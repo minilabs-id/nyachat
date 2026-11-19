@@ -14,6 +14,9 @@ import com.startupmini.nyachat.R
  * Fonts (provider GMS — tanpa berkas TTF di APK). Sertifikat provider ada di
  * res/values/font_certs.xml. Bila provider/gagal muat (device tanpa GMS,
  * Robolectric test), Compose otomatis fallback ke font sistem — tidak crash.
+ * Catatan golden (D-L4): karena fallback itulah PNG di `src/test/snapshots/`
+ * merepresentasikan font sistem, BUKAN Plus Jakarta Sans. Re-record golden di
+ * environment CI yang sama dengan lokal sebelum membandingkan piksel.
  */
 private val googleFontProvider = GoogleFont.Provider(
     providerAuthority = "com.google.android.gms.fonts",
@@ -36,6 +39,12 @@ val BrandFontFamily = FontFamily(
  * Typography M3: peran display, headline & title memakai font brand; peran
  * body & label tetap FontFamily.Default supaya teks panjang (isi chat, laporan
  * AI) memakai font sistem yang paling optimal untuk membaca.
+ *
+ * D-L5 — UKURAN TEKS MINIMUM = 12sp (`labelSmall`). Jangan memakai fontSize
+ * di bawah 12sp untuk teks informasi (saat ini 11sp masih ada di
+ * `MembershipGateScreen` / `ManageMembersScreen` — dimiliki agent dialog,
+ * TODO: naikkan ke `MaterialTheme.typography.labelSmall`). Angka dekoratif
+ * bukan teks informasi dikecualikan.
  */
 val Typography = Typography(
     displayLarge = TextStyle(fontFamily = BrandFontFamily, fontWeight = FontWeight.Bold, fontSize = 57.sp, lineHeight = 64.sp, letterSpacing = (-0.25).sp),
@@ -55,3 +64,16 @@ val Typography = Typography(
         letterSpacing = 0.5.sp
     )
 )
+
+/**
+ * D-L7 — turunan `bodyMedium` dengan lineHeight yang sebelumnya di-override
+ * inline. Definisi ini sengaja TIDAK mengubah nama TextStyle existing;
+ * konsumen (ChatBubbles / AiReportDialog) bisa adopt bertahap lewat
+ * `MaterialTheme.typography.bodyChat` bila Typography diperluas, atau pakai
+ * token top-level ini langsung.
+ */
+/** Isi bubble chat — `bodyMedium` dengan lineHeight 22.sp (ChatBubbles:668). */
+val bodyChat: TextStyle = Typography.bodyMedium.copy(lineHeight = 22.sp)
+
+/** Isi laporan AI — `bodyMedium` dengan lineHeight 24.sp (AiReportDialog:232). */
+val bodyReport: TextStyle = Typography.bodyMedium.copy(lineHeight = 24.sp)

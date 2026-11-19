@@ -3,6 +3,17 @@
 import androidx.compose.ui.graphics.Color
 
 // Palet aksen yang dipakai di seluruh UI (warna utama mengikuti tema Material 3)
+
+// D-M2 / B-M15 — aksen brand hijau Nyachat, diekspos lewat SemanticColors.brandAccent
+// supaya layar (mis. onboarding PIN) tidak lagi menghardcode #007A49 yang kontrasnya
+// jatuh ~2.5:1 di dark mode. Dark = tone terang #6FE5AA (selaras primary dark tema).
+val BrandGreen = Color(0xFF007A49)
+val BrandGreenDark = Color(0xFF6FE5AA)
+
+// D-L3 — shade AI dark yang sengaja DIBEDAKAN dari AiBlueDark (#AAC7FF) supaya
+// `aiAccent` tidak identik dengan `ai` di mode gelap.
+val AiBlueDarkBright = Color(0xFF8AB4FF)
+
 val WifePink = Color(0xFFD81B60) // Clean Pink
 val WifePinkDark = Color(0xFFFF80AB)  // Lebih terang untuk dark mode
 
@@ -63,7 +74,8 @@ val CategoryColorsLight = listOf(
     Color(0xFF188038), // Google Green (darken, 4.90:1)
     Color(0xFF9334E6), // Google Purple (5.30:1, aman)
     Color(0xFF00626E), // Google Cyan (darken, 6.90:1)
-    Color(0xFFA83D00)  // Google Orange (darken, 6.16:1)
+    Color(0xFFA83D00), // Google Orange (darken, 6.16:1)
+    Color(0xFF5F6368)  // M2: netral untuk potongan agregat "Lainnya" (6.9:1)
 )
 
 // Kategori chart - dark mode (muted, lebih nyaman di layar gelap)
@@ -74,7 +86,8 @@ val CategoryColorsDark = listOf(
     Color(0xFF69F0AE), // Muted Green
     Color(0xFFEA80FC), // Muted Purple
     Color(0xFF80DEEA), // Muted Cyan
-    Color(0xFFFFD180)  // Muted Orange
+    Color(0xFFFFD180), // Muted Orange
+    Color(0xFFB0BEC5)  // M2: netral untuk potongan agregat "Lainnya"
 )
 
 

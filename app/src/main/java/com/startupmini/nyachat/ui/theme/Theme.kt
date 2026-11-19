@@ -1,19 +1,17 @@
 package com.startupmini.nyachat.ui.theme
 
 import android.app.Activity
-import android.os.Build
+import androidx.compose.animation.core.LocalMotionDurationScale
+import androidx.compose.animation.core.MotionDurationScale
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
@@ -78,21 +76,31 @@ private val DarkColorScheme = darkColorScheme(
     scrim = Color(0xFF000000)
 )
 
+/**
+ * D-M1 — Material You / dynamic color sengaja DIMATIKAN di semua API level,
+ * termasuk Android 12+ (API 31). Nyachat memakai palet brand hijau `#007A49` /
+ * biru `#0066FF` sebagai identitas visual; mengikuti wallpaper akan merusak
+ * kontras token semantik (income/expense/AI) yang sudah di-audit WCAG.
+ *
+ * Cabang `dynamic*ColorScheme` dan import terkait SUDAH DIHAPUS — tidak ada
+ * jalur setengah jalan. Parameter [dynamicColor] tetap dipertahankan untuk
+ * kompatibilitas sumber (nilai default `false`) tetapi sengaja tidak dibaca:
+ * satu-satunya sumber kebenaran warna adalah [LightColorScheme] /
+ * [DarkColorScheme] + [LocalSemanticColors]. Jangan mengaktifkan dynamic color
+ * tanpa mengaudit ulang seluruh token kontras.
+ */
+const val USE_DYNAMIC_COLOR = false
+
 @Composable
 fun CoupleFinanceTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false, // Disabled to ensure we see our custom colors
+    dynamicColor: Boolean = USE_DYNAMIC_COLOR, // lihat D-M1 — brand-first, dinonaktifkan secara eksplisit
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-    
+    // D-M1: brand scheme dipilih langsung; tanpa dynamic color tidak ada percabangan
+    // API-level yang tak pernah tercapai.
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+
     val view = LocalView.current
     if (!view.isInEditMode) {
         @Suppress("DEPRECATION") // statusBarColor/navigationBarColor transparan utk edge-to-edge lintas API
@@ -112,7 +120,14 @@ fun CoupleFinanceTheme(
             // Token warna semantik (income/expense/AI/dsb.) disediakan sekali di
             // sini — layar tidak perlu lagi mendeteksi mode gelap via luminance.
             CompositionLocalProvider(
-                LocalSemanticColors provides if (darkTheme) DarkSemanticColors else LightSemanticColors
+                LocalSemanticColors provides if (darkTheme) DarkSemanticColors else LightSemanticColors,
+                // Audit R2-H8: scale 0 membuat SELURUH animasi Compose/M3
+                // (sheet, dialog, dropdown, tooltip) snap saat "Hapus animasi"
+                // aktif — tidak hanya animasi yang memakai Motion.reducedMotion.
+                LocalMotionDurationScale provides object : MotionDurationScale {
+                    override val scaleFactor: Float =
+                        if (Motion.reducedMotion) 0f else 1f
+                }
             ) {
                 content()
             }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    D-M3 — Ikon splash Android 12+ (windowSplashScreenAnimatedIcon).
+    `ic_launcher_foreground` sengaja TIDAK dipakai lagi karena group transform
+    `scale=0.5`-nya membuat logo tampil terlalu kecil di splash. Drawable ini
+    mereferensikan `@drawable/ic_logo` (logo utuh, tanpa 0.5 scale) lalu
+    di-sizing ke kotak ikon splash (~96dp) supaya logo tampil proporsional dan
+    tetap berada di safe zone lingkaran sistem.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="96dp"
+        android:height="92dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_logo" />
+</layer-list>

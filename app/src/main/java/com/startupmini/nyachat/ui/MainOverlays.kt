@@ -1,20 +1,27 @@
 package com.startupmini.nyachat.ui
 
 import android.content.Context
+import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.matchParentSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarData
@@ -22,7 +29,10 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarVisuals
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +46,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlin.math.abs
@@ -55,11 +68,14 @@ import com.startupmini.nyachat.ui.screens.PinSwitchDialog
 import com.startupmini.nyachat.ui.screens.RestoreConfirmDialog
 import com.startupmini.nyachat.ui.screens.RestorePickerDialog
 import com.startupmini.nyachat.ui.screens.UpdateAvailableDialog
-import com.startupmini.nyachat.ui.screens.UpdateMessageDialog
 import com.startupmini.nyachat.ui.screens.installApk
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+
+private const val TAG = "MainOverlays"
 
 /**
  * TASK-1.3 lanjutan — overlay GLOBAL yang tampil di SEMUA layar (termasuk
@@ -89,6 +105,14 @@ fun BoxScope.MainOverlays(
     // status bar. Diisi MainActivity dari startupPhase.
     snackbarBelowTopBar: Boolean = false
 ) {
+    // C7/C8: resolve string di composable scope — JANGAN context.getString di
+    // dalam coroutine (lint LocalContextGetResourceValueCall).
+    val updateVerifyFailedLabel = stringResource(R.string.ux_update_verify_failed)
+    val updateDownloadFailedLabel = stringResource(R.string.update_download_failed)
+    val updateCheckTitle = stringResource(R.string.ux_update_check_title)
+    val updateErrorTitle = stringResource(R.string.ux_update_error_title)
+    val statusCheckingLabel = stringResource(R.string.ux_status_checking)
+
     // Gate keanggotaan: setelah PIN dimasukkan, sebelum data terbuka.
     // Owner menyiapkan workspace; anggota kirim permintaan & menunggu
     // persetujuan pemilik. Layar penuh menimpa semua konten lain.
@@ -115,6 +139,16 @@ fun BoxScope.MainOverlays(
             )
         }
     }
+
+    // R2-H7: saat gate keanggotaan aktif, SEMUA UI di luar gate harus hilang
+    // dari pohon semantics (TalkBack/fokus keyboard) — scrim pointerInput di
+    // MembershipGateScreen hanya komplemen pointer-only, tidak cukup untuk a11y.
+    // Gate itu sendiri tetap di luar wrapper ini sehingga tetap bisa dibaca.
+    Box(
+        modifier = Modifier
+            .matchParentSize()
+            .semantics { if (dialogs.connectGate != null) invisibleToUser() }
+    ) {
 
     // Layar kelola anggota & permintaan bergabung (owner/member).
     // Guard `workspacePin != null` → smart cast aman (audit ketahanan:
@@ -161,18 +195,48 @@ fun BoxScope.MainOverlays(
                     // di main manifest.
                     dialogs.isDownloadingUpdate = true
                     dialogs.updateProgress = 0f
+                    dialogs.updateMessageIsError = true
+                    var rejection: String? = null
                     try {
                         val url = release.apkUrl
                         if (url == null) throw IllegalStateException("APK tidak tersedia di release")
+
+                        // H4/M10 (audit 2026-11-19): cek konfigurasi sidik jari dan
+                        // host URL lebih dulu. Tanpa fingerprint, update DITOLAK
+                        // (fail-closed) — APK tak terverifikasi tidak boleh masuk.
+                        // C7: detail teknis (sertifikat/host/signature) diganti
+                        // pesan ux_update_verify_failed yang bisa dipahami user.
+                        if (BuildConfig.APK_CERT_SHA256.isBlank()) {
+                            rejection = updateVerifyFailedLabel
+                            throw IllegalStateException(rejection)
+                        }
+                        if (!GitHubUpdateChecker.isAllowedApkUrl(url)) {
+                            rejection = updateVerifyFailedLabel
+                            throw IllegalStateException(rejection)
+                        }
+
                         val dest = File(context.cacheDir, "downloads/nyachat-${release.versionName}.apk")
                         // Progres dipanggil dari thread IO → marshal ke main scope
                         // sebelum menulis state Compose.
                         GitHubUpdateChecker.downloadApk(url, dest) { p ->
                             scope.launch { dialogs.updateProgress = p }
                         }
+
+                        // H4/M10: WAJIB verifikasi tanda tangan SEBELUM install.
+                        // Parsing sertifikat via PackageManager di thread IO agar
+                        // tidak mem-blok main thread saat Compose recompose.
+                        val verified = withContext(Dispatchers.IO) {
+                            GitHubUpdateChecker.verifyApkSignature(context, dest)
+                        }
+                        if (!verified) {
+                            rejection = updateVerifyFailedLabel
+                            throw IllegalStateException(rejection)
+                        }
                         installApk(context, dest)
                     } catch (e: Exception) {
-                        dialogs.updateMessage = context.getString(R.string.update_download_failed)
+                        Log.w(TAG, "Update gagal: ${e.message}")
+                        // C7: pesan error user-facing, bukan detail teknis.
+                        dialogs.updateMessage = rejection ?: updateDownloadFailedLabel
                     } finally {
                         dialogs.isDownloadingUpdate = false
                         dialogs.updateProgress = 0f
@@ -184,10 +248,39 @@ fun BoxScope.MainOverlays(
         )
     }
 
+    // R2-H4: loading saat mengecek update (judul ux_update_check_title).
+    if (dialogs.isCheckingUpdate) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(updateCheckTitle) },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(statusCheckingLabel)
+                }
+            },
+            confirmButton = {}
+        )
+    }
+
+    // C7/C8: satu dialog pesan dengan judul kontekstual — error memakai
+    // ux_update_error_title, hasil cek/info memakai ux_update_check_title.
     dialogs.updateMessage?.let { msg ->
-        UpdateMessageDialog(
-            message = msg,
-            onDismiss = { dialogs.updateMessage = null }
+        AlertDialog(
+            onDismissRequest = { dialogs.updateMessage = null },
+            title = {
+                Text(if (dialogs.updateMessageIsError) updateErrorTitle else updateCheckTitle)
+            },
+            text = { Text(msg) },
+            confirmButton = {
+                TextButton(onClick = { dialogs.updateMessage = null }) {
+                    Text(stringResource(R.string.action_ok))
+                }
+            }
         )
     }
 
@@ -200,9 +293,41 @@ fun BoxScope.MainOverlays(
     val pendingCrossFamilyRestore by driveController.crossFamilyRestore.collectAsStateWithLifecycle()
     val backupPassphrasePrompt by driveController.passphrasePrompt.collectAsStateWithLifecycle()
 
+    // F23: Back fisik menutup gate keanggotaan, TAPI hanya bila gate benar-benar
+    // lapisan teratas. Dialog/sheet yang menumpuk di atasnya tetap menangani Back
+    // agar tidak ikut tertutup (mis. PinSwitchDialog/Update/restore sheet).
+    BackHandler(
+        enabled = dialogs.connectGate != null &&
+            dialogs.pendingPinConnect == null &&
+            dialogs.updateInfo == null &&
+            dialogs.updateMessage == null &&
+            !dialogs.showManageMembers &&
+            restoreBackups == null &&
+            restoreTarget == null &&
+            pendingCrossFamilyRestore == null &&
+            backupPassphrasePrompt == null &&
+            !backupBusy
+    ) { dialogs.connectGate = null }
+
+    // F19: restore adalah operasi kritis — Back/tap-di-luar/tombol Batal TIDAK
+    // langsung membatalkan; tampilkan konfirmasi dulu.
+    var restoreInProgress by remember { mutableStateOf(false) }
+    var cancelRestoreConfirm by remember { mutableStateOf(false) }
+    LaunchedEffect(backupBusy) {
+        if (!backupBusy) {
+            restoreInProgress = false
+            cancelRestoreConfirm = false
+        }
+    }
+    val handleBackupCancel: () -> Unit = {
+        if (restoreInProgress) cancelRestoreConfirm = true
+        else driveController.cancelActiveOperation()
+    }
+
     if (backupBusy) {
         BackupProgressDialog(
-            onCancel = { driveController.cancelActiveOperation() }
+            onCancel = handleBackupCancel,
+            onDismissRequest = handleBackupCancel
         )
     }
 
@@ -217,7 +342,10 @@ fun BoxScope.MainOverlays(
     restoreTarget?.let { f ->
         RestoreConfirmDialog(
             file = f,
-            onConfirm = { driveController.confirmRestore(f) },
+            onConfirm = {
+                restoreInProgress = true
+                driveController.confirmRestore(f)
+            },
             onDismiss = { driveController.dismissRestoreTarget() }
         )
     }
@@ -226,7 +354,10 @@ fun BoxScope.MainOverlays(
     // menimpa data lokal & menyinkronkannya ke workspace ini (P1).
     pendingCrossFamilyRestore?.let {
         CrossFamilyRestoreDialog(
-            onConfirm = { driveController.proceedCrossFamilyRestore() },
+            onConfirm = {
+                restoreInProgress = true
+                driveController.proceedCrossFamilyRestore()
+            },
             onDismiss = { driveController.cancelCrossFamilyRestore() }
         )
     }
@@ -236,8 +367,38 @@ fun BoxScope.MainOverlays(
     backupPassphrasePrompt?.let { prompt ->
         PassphraseDialog(
             prompt = prompt,
-            onSubmit = { driveController.submitPassphrase(it) },
+            onSubmit = {
+                if (prompt is DriveBackupController.PassphrasePrompt.Restore) {
+                    restoreInProgress = true
+                }
+                driveController.submitPassphrase(it)
+            },
             onCancel = { driveController.cancelPassphrase() }
+        )
+    }
+
+    // F19: konfirmasi pembatalan restore — data bisa tidak lengkap bila dihentikan.
+    if (cancelRestoreConfirm) {
+        AlertDialog(
+            onDismissRequest = { cancelRestoreConfirm = false },
+            title = { Text(stringResource(R.string.ux_cancel_restore_title)) },
+            text = { Text(stringResource(R.string.ux_cancel_restore_body)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        cancelRestoreConfirm = false
+                        restoreInProgress = false
+                        driveController.cancelActiveOperation()
+                    }
+                ) { Text(stringResource(R.string.ux_cancel_restore_confirm)) }
+            },
+            // C9: tombol yang MELANJUTKAN restore adalah dismiss — sebelumnya
+            // labelnya terbalik (OK = batalkan, Batal = lanjutkan).
+            dismissButton = {
+                TextButton(onClick = { cancelRestoreConfirm = false }) {
+                    Text(stringResource(R.string.ux_continue_restore))
+                }
+            }
         )
     }
 
@@ -251,6 +412,9 @@ fun BoxScope.MainOverlays(
         modifier = Modifier
             .align(Alignment.TopCenter)
             .windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top))
+            // Review: inset status bar TETAP diperlukan (enableEdgeToEdge aktif,
+            // induk tidak menyediakannya). Total offset dijaga ≈72dp/32dp:
+            // statusBar ~24dp + manual 48dp/8dp. Dulu 24dp + 72dp ≈100dp.
             // BUG-fix (audit 2026-08-14): TopCenter + 8dp menimpa TopAppBar
             // (64dp) sehingga snackbar "Tercatat" menutupi ikon Kelola Anggota/
             // Settings. Saat top bar tampil, turunkan snackbar ke bawahnya
@@ -258,7 +422,7 @@ fun BoxScope.MainOverlays(
             // tetap 8dp. Posisi atas dipertahankan — alasan historisnya masih
             // berlaku (BottomCenter+imePadding menutupi kolom ketik).
             .padding(
-                top = if (snackbarBelowTopBar) 72.dp else 8.dp,
+                top = if (snackbarBelowTopBar) 48.dp else 8.dp,
                 start = 20.dp,
                 end = 20.dp
             ),
@@ -271,6 +435,7 @@ fun BoxScope.MainOverlays(
             )
         }
     )
+    } // R2-H7: akhir wrapper semantics background (di luar gate).
 }
 
 /**

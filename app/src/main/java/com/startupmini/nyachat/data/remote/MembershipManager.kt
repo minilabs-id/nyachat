@@ -7,6 +7,8 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.functions.FirebaseFunctions
+import com.google.firebase.functions.FirebaseFunctionsException
 import com.google.firebase.messaging.FirebaseMessaging
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.data.local.AvatarStore
@@ -245,11 +247,15 @@ object MembershipManager {
 
     /**
      * Batas tunggu keputusan owner pada satu panggilan waitForJoinRequestDecision.
-     * Kalau lewat, gate akan menampilkan error timeout (dan user bisa Coba Lagi).
-     * Owner yang sibuk lebih baik dilaporkan gagal timeout daripada gate
-     * menggantung selamanya. (P2-10)
+     * Kalau lewat, gate akan mengecek ulang apakah dokumen permintaan masih ada:
+     * - masih ada → listener dipasang ulang (requestedOnce tetap true);
+     * - sudah hilang → gate melaporkan timeout terminal. (P2-10)
+     *
+     * Audit UX R2-B2: dulu 10 menit sementara gate menampilkan batas 30 menit —
+     * pesan timeout tidak jujur. Konstanta ini kini SATU sumber kebenaran yang
+     * dipakai juga oleh MembershipGateScreen (GATE_MAX_WAIT_MS).
      */
-    private const val JOIN_DECISION_TIMEOUT_MS = 10 * 60 * 1000L
+    const val JOIN_DECISION_TIMEOUT_MS = 30 * 60 * 1000L
 
     // Daftar anggota & permintaan bergabung — dikonsumsi UI (layar Kelola Anggota).
     private val _members = MutableStateFlow<List<FamilyMember>>(emptyList())
@@ -690,6 +696,45 @@ object MembershipManager {
         _lastFailure.value = msg
     }
 
+    /** Simpan kode HttpsError dari callable Functions untuk diagnosa di layar gate. */
+    private fun recordFunctionFailure(e: Throwable) {
+        val code = (e as? FirebaseFunctionsException)?.code?.name ?: "UNKNOWN"
+        _lastFailure.value = MembershipFailure(code, e.message ?: e.javaClass.simpleName)
+    }
+
+    /** M6: FAILED_PRECONDITION (atau pesan bertema owner) = owner terakhir. */
+    private fun isNeedOwnerTransfer(e: Throwable): Boolean {
+        val msg = e.message.orEmpty()
+        return e is FirebaseFunctionsException &&
+            (e.code == FirebaseFunctionsException.Code.FAILED_PRECONDITION ||
+                msg.contains("OWNER", true) || msg.contains("TRANSFER", true))
+    }
+
+    /** M6: RESOURCE_EXHAUSTED / pesan "full" dari approveJoinAtomic = workspace penuh. */
+    private fun isWorkspaceFull(e: Throwable): Boolean {
+        val msg = e.message.orEmpty()
+        return e is FirebaseFunctionsException &&
+            (e.code == FirebaseFunctionsException.Code.RESOURCE_EXHAUSTED ||
+                msg.contains("FULL", true) || msg.contains("PENUH", true))
+    }
+
+    /**
+     * M12: reservasi PIN lewat callable `reservePin` SEBELUM create dokumen
+     * keluarga. Token hasil reservasi wajib ikut di payload create — server
+     * memakainya untuk memverifikasi klaim PIN & menegakkan
+     * "1 akun = 1 workspace" (klien tidak bisa lagi squat PIN / menumpuk workspace).
+     * Return null bila reservasi gagal — pemanggil harus menggagalkan create.
+     */
+    private suspend fun reservePinToken(pin: String): String? =
+        runCatching {
+            val data = FirebaseFunctions.getInstance()
+                .getHttpsCallable("reservePin")
+                .call(mapOf("familyId" to pin))
+                .await().data
+            (data as? Map<*, *>)?.get("token")?.toString()?.takeIf { it.isNotBlank() }
+        }.onFailure { Log.w(TAG, "reservePin gagal: ${it.message}") }
+            .getOrNull()
+
     /**
      * Tulis member doc diri sendiri bila belum ada (bootstrap & migrasi workspace
      * lama). internal (bukan private): dipakai juga FirestoreSyncManager.ensureFamilyDoc
@@ -775,9 +820,12 @@ object MembershipManager {
                 val fam = famRef.get().await()
                 ownedByMe = fam.exists() && fam.getString(Constants.Fields.OWNER_ID) == uid
                 if (!fam.exists()) {
+                    // M12: reservasi PIN dulu — token WAJIB ikut di payload create.
+                    val token = reservePinToken(pin) ?: return@runCatching OwnerSetupResult.FAILED
                     famRef.set(
                         mapOf(
                             Constants.Fields.OWNER_ID to uid,
+                            Constants.Fields.CLAIM_TOKEN to token,
                             Constants.Fields.CREATED_AT to FieldValue.serverTimestamp(),
                             // r1.6.0: default nama & plan workspace baru.
                             Constants.Fields.NAME to Constants.Defaults.FAMILY_NAME,
@@ -791,9 +839,12 @@ object MembershipManager {
                 // Belum jadi anggota → dokumen tidak bisa dibaca (rules).
                 if (e.code != com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) throw e
                 try {
+                    // M12: jalur create saat baca doc ditolak rules — tetap reservasi dulu.
+                    val token = reservePinToken(pin) ?: return@runCatching OwnerSetupResult.FAILED
                     famRef.set(
                         mapOf(
                             Constants.Fields.OWNER_ID to uid,
+                            Constants.Fields.CLAIM_TOKEN to token,
                             Constants.Fields.CREATED_AT to FieldValue.serverTimestamp(),
                             // r1.6.0: default nama & plan workspace baru.
                             Constants.Fields.NAME to Constants.Defaults.FAMILY_NAME,
@@ -859,6 +910,27 @@ object MembershipManager {
         // (approved/rejected) walau pemohon bukan member (belum punya member doc).
         val fcmToken = runCatching { FirebaseMessaging.getInstance().token.await() }
             .getOrNull()
+        // M5: COUNTER SERVER yang otoritatif — daftarkan percobaan via callable
+        // SEBELUM membuat joinRequest. PinAttemptLimiter di PinConnectScreen hanya
+        // UX (umpan balik instan), bukan pembatas keamanan.
+        try {
+            FirebaseFunctions.getInstance()
+                .getHttpsCallable("registerPinAttempt")
+                .call(mapOf("familyId" to pin))
+                .await()
+        } catch (e: Exception) {
+            if (e is FirebaseFunctionsException &&
+                e.code == FirebaseFunctionsException.Code.RESOURCE_EXHAUSTED
+            ) {
+                // Throttled: gagalkan & simpan detailnya supaya gate bisa diagnosa.
+                Log.w(TAG, "requestJoin di-throttle server: ${e.message}")
+                recordFunctionFailure(e)
+                return JoinRequestResult.FAILED
+            }
+            // Error lain (mis. jaringan) tidak memblokir alur join — server
+            // tetap punya counter & rules sendiri.
+            Log.w(TAG, "registerPinAttempt gagal: ${e.message}")
+        }
         return try {
             db().collection(Constants.Collections.FAMILIES).document(pin)
                 .collection(Constants.Collections.JOIN_REQUESTS).document(uid)
@@ -947,79 +1019,45 @@ object MembershipManager {
 
     /**
      * Owner menyetujui permintaan → jadikan anggota & hapus permintaan (atomik).
-     * r1.6.0: cek kapasitas dulu (jumlah member >= limit plan) — Workspace
-     * penuh dikembalikan sebagai [ApproveResult.WORKSPACE_FULL] supaya UI bisa
-     * menawarkan upgrade. Cek di sisi app (rules tidak bisa COUNT).
      *
-     * Batasan transaksi (audit r1.6.0): SDK Android tidak bisa query koleksi di
-     * dalam transaksi, jadi cek jumlah member tetap dilakukan SEBELUM transaksi
-     * (read non-atomik). Dua approve konkuren di ambang batas bisa menghasilkan
-     * kelebihan 1 anggota (TOCTOU) — perbaikan sejati butuh counter doc
-     * `memberCount` di doc keluarga atau verifikasi server-side (cloud function);
-     * dicatat sebagai pekerjaan pasca-rilis.
+     * M6: kapasitas (plan) & atomicity kini di-enforce SERVER lewat callable
+     * `approveJoinAtomic` — klien TIDAK lagi membaca plan / menghitung anggota.
+     * Cek lama (canApproveMember di sisi app) rawan TOCTOU & plan basi, jadi
+     * tidak dipakai lagi di jalur ini (helper murninya tetap ada untuk tes).
+     * Workspace penuh → [ApproveResult.WORKSPACE_FULL] supaya UI bisa menawarkan
+     * upgrade; error lain → [ApproveResult.FAILED].
      */
     suspend fun approveJoin(pin: String, request: JoinRequest): ApproveResult {
-        val famRef = db().collection(Constants.Collections.FAMILIES).document(pin)
-        val memberRef = famRef.collection(Constants.Collections.MEMBERS).document(request.uid)
-        val requestRef = famRef.collection(Constants.Collections.JOIN_REQUESTS).document(request.uid)
-        // Plan dibaca LANGSUNG dari doc keluarga (bukan _familyPlan.value yang
-        // bisa basi sebelum snapshot listener pertama tiba — audit r1.6.0).
-        val plan = try {
-            (famRef.get().await().data?.get(Constants.Fields.PLAN) as? String)
-                ?: Constants.Plans.FREE
-        } catch (e: Exception) {
-            Log.w(TAG, "approveJoin: baca doc keluarga gagal: ${e.message}")
-            return ApproveResult.FAILED
-        }
-        val memberCount = try {
-            famRef.collection(Constants.Collections.MEMBERS).get().await().size()
-        } catch (e: Exception) {
-            Log.w(TAG, "approveJoin: hitung anggota gagal: ${e.message}")
-            return ApproveResult.FAILED
-        }
-        if (!canApproveMember(memberCount, plan)) {
-            return ApproveResult.WORKSPACE_FULL
-        }
         return runCatching {
-            // Satu transaksi: baca ulang permintaan (deteksi konflik), lalu tulis
-            // member + hapus permintaan secara atomik. Kalau permintaan sudah
-            // diproses device lain, transaksi tidak menulis apa-apa.
-            db().runTransaction { txn ->
-                if (txn.get(requestRef).exists()) {
-                    txn.set(
-                        memberRef,
-                        nonNullMap(
-                            Constants.Fields.UID to request.uid,
-                            Constants.Fields.EMAIL to request.email,
-                            Constants.Fields.NAME to request.name,
-                            Constants.Fields.ROLE to Constants.Roles.MEMBER,
-                            Constants.Fields.LABEL to request.name.ifBlank { Constants.Defaults.LABEL },
-                            // r1.4.0 (avatar foto): URL foto Google pemohon disalin
-                            // ke member doc saat persetujuan. Blank → null →
-                            // di-drop nonNullMap (hindari string kosong di doc).
-                            Constants.Fields.PHOTO_URL to request.photoUrl.takeIf { it.isNotBlank() },
-                            // P3 (audit keanggotaan): jam server, bukan jam klien
-                            // (selisih jam antar perangkat tidak memengaruhi addedAt).
-                            Constants.Fields.ADDED_AT to FieldValue.serverTimestamp()
-                        )
-                    )
-                    txn.delete(requestRef)
-                }
-            }.await()
+            FirebaseFunctions.getInstance()
+                .getHttpsCallable("approveJoinAtomic")
+                .call(mapOf("familyId" to pin, "requestUid" to request.uid))
+                .await()
             // r1.7.0 (E2EE): kalau workspace sudah terenkripsi & public key member
             // baru sudah ada (perangkatnya sudah start), langsung wrap grup key ke
             // dia — kalau belum, self-heal berkala E2eeSyncManager yang mengurus.
             E2eeSyncManager.wrapForNewMember(request.uid)
             ApproveResult.SUCCESS
-        }.onFailure { Log.w(TAG, "approveJoin gagal: ${it.message}") }
-            .getOrDefault(ApproveResult.FAILED)
+        }.onFailure { e ->
+            Log.w(TAG, "approveJoin gagal: ${e.message}")
+            recordFunctionFailure(e)
+        }.getOrElse { mapApproveError(it) }
     }
 
-    /** Owner menolak permintaan bergabung (atomik: tandai 'rejected' + hapus). */
-    suspend fun rejectJoin(pin: String, uid: String) {
+    /** M6: petakan HttpsError dari `approveJoinAtomic` ke [ApproveResult]. */
+    private fun mapApproveError(e: Throwable): ApproveResult =
+        if (isWorkspaceFull(e)) ApproveResult.WORKSPACE_FULL else ApproveResult.FAILED
+
+    /**
+     * Owner menolak permintaan bergabung (atomik: tandai 'rejected' + hapus).
+     *
+     * R2-H3: mengembalikan HASIL operasi (bukan Unit yang selalu tampak sukses)
+     * supaya UI tidak pernah melaporkan "berhasil" saat transaksi gagal.
+     */
+    suspend fun rejectJoin(pin: String, uid: String): Boolean {
         val requestRef = db().collection(Constants.Collections.FAMILIES).document(pin)
             .collection(Constants.Collections.JOIN_REQUESTS).document(uid)
-        runCatching {
+        return runCatching {
             // Audit r1.6.0: tandai 'rejected' + hapus dalam SATU transaksi. Status
             // 'rejected' dibaca cloud function handleJoinRequest saat doc dihapus
             // (notifikasi ke pemohon); commit atomik menghilangkan window crash
@@ -1032,54 +1070,88 @@ object MembershipManager {
                 )
                 txn.delete(requestRef)
             }.await()
+            true
         }.onFailure { Log.w(TAG, "rejectJoin gagal: ${it.message}") }
+            .getOrDefault(false)
     }
 
-    /** Owner mengganti nama workspace (r1.6.0 — nama custom di top bar & Kelola Anggota). */
-    suspend fun setFamilyName(pin: String, name: String) {
+    /**
+     * Owner mengganti nama workspace (r1.6.0 — nama custom di top bar & Kelola Anggota).
+     * R2-H3: return true hanya bila update Firestore benar-benar berhasil.
+     */
+    suspend fun setFamilyName(pin: String, name: String): Boolean {
         val trimmed = name.trim()
-        if (trimmed.isBlank()) return
-        runCatching {
+        if (trimmed.isBlank()) return false
+        return runCatching {
             db().collection(Constants.Collections.FAMILIES).document(pin)
                 .update(Constants.Fields.NAME, trimmed).await()
+            true
         }.onFailure { Log.w(TAG, "setFamilyName gagal: ${it.message}") }
+            .getOrDefault(false)
     }
 
     /**
      * Owner mengganti plan langganan (r1.6.0).
-     * PLACEHOLDER — beta: langsung set plan (free/pro) untuk menguji cap anggota.
-     * Saat produksi + billing, alur ini diganti verifikasi pembelian Play Billing
-     * (server-side otoritatif).
+     *
+     * H3: plan adalah data SERVER-AUTHORITATIVE — klien TIDAK PERNAH menulis
+     * field `plan` langsung ke dokumen keluarga. Satu-satunya jalur adalah
+     * callable `setWorkspacePlan` yang memverifikasi entitlement Play Billing di
+     * server (gagal tanpa entitlement). Return true hanya bila server menerima.
      */
-    suspend fun setPlan(pin: String, plan: String) {
-        if (plan != Constants.Plans.FREE && plan != Constants.Plans.PRO) return
-        runCatching {
-            db().collection(Constants.Collections.FAMILIES).document(pin)
-                .update(Constants.Fields.PLAN, plan).await()
-        }.onFailure { Log.w(TAG, "setPlan gagal: ${it.message}") }
+    suspend fun setPlan(pin: String, plan: String): Boolean {
+        if (plan != Constants.Plans.FREE && plan != Constants.Plans.PRO) return false
+        return runCatching {
+            FirebaseFunctions.getInstance()
+                .getHttpsCallable("setWorkspacePlan")
+                .call(mapOf("familyId" to pin, "plan" to plan))
+                .await()
+            true
+        }.onFailure { e ->
+            Log.w(TAG, "setPlan gagal: ${e.message}")
+            recordFunctionFailure(e)
+        }.getOrDefault(false)
     }
 
     /** Kapasitas anggota maksimum plan workspace aktif (free=2 / pro=6). */
     fun memberLimit(): Int = memberLimitFor(_familyPlan.value)
 
-    /** Owner menghapus anggota dari workspace (tidak untuk diri sendiri). */
-    suspend fun removeMember(pin: String, uid: String) {
-        if (uid == currentUid()) return
-        runCatching {
+    /**
+     * Owner menghapus anggota dari workspace (tidak untuk diri sendiri).
+     * R2-H3: return true HANYA bila delete berhasil — rotasi kunci berikutnya
+     * bersifat best-effort & tidak mengubah hasil penghapusan.
+     */
+    suspend fun removeMember(pin: String, uid: String): Boolean {
+        if (uid == currentUid()) return false
+        val deleted = runCatching {
             db().collection(Constants.Collections.FAMILIES).document(pin)
                 .collection(Constants.Collections.MEMBERS).document(uid).delete().await()
         }.onFailure { Log.w(TAG, "removeMember gagal: ${it.message}") }
+        if (deleted.isFailure) return false
+        // H2: anggota yang di-kick masih memegang grup key lama → putar kunci
+        // grup (owner-only) supaya sisa anggota menerima kunci baru. Kegagalan
+        // rotasi HANYA dilog — penghapusan sudah berhasil & tidak di-rollback.
+        // Kunci LOKAL sengaja tidak dihapus di sini: itu urusan perangkat
+        // (MainActivity), bukan keanggotaan workspace.
+        runCatching { E2eeSyncManager.rotateGroupKey() }
+            .onFailure { Log.w(TAG, "rotateGroupKey gagal setelah removeMember: ${it.message}") }
+            .onSuccess { ok -> if (!ok) Log.w(TAG, "rotateGroupKey return false setelah removeMember") }
+        return true
     }
 
-    /** Owner mengubah peran (owner/member) dan/atau label tampilan anggota. */
-    suspend fun setMemberRole(pin: String, uid: String, role: String, label: String? = null) {
-        runCatching {
+    /**
+     * Owner mengubah peran (owner/member) dan/atau label tampilan anggota.
+     * R2-H3: return true hanya bila update Firestore benar-benar berhasil.
+     */
+    suspend fun setMemberRole(pin: String, uid: String, role: String, label: String? = null): Boolean {
+        return runCatching {
             val updates = mutableMapOf<String, Any>(Constants.Fields.ROLE to role)
             if (label != null) updates[Constants.Fields.LABEL] = label
             db().collection(Constants.Collections.FAMILIES).document(pin)
                 .collection(Constants.Collections.MEMBERS).document(uid)
                 .update(updates).await()
+            true
         }.onFailure { Log.w(TAG, "setMemberRole gagal: ${it.message}") }
+            .getOrDefault(false)
     }
 
     /**
@@ -1117,42 +1189,28 @@ object MembershipManager {
     /**
      * Keluar dari workspace (r1.4.0): hapus doc members/{uid} diri sendiri.
      *
-     * Guard anti-yatim (keputusan r1.4.0): owner TIDAK boleh keluar kalau dia
-     * satu-satunya owner — wajib promote anggota lain jadi owner DULU
-     * (dikembalikan sebagai [LeaveWorkspaceResult.NEED_OWNER_TRANSFER]). Guard
-     * ini di sisi app karena rules Firestore tidak bisa query daftar member.
-     * Batasan (audit r1.6.0): hitung owner lain TIDAK bisa masuk transaksi (SDK
-     * Android tidak bisa query koleksi di dalam transaksi) — dua owner terakhir
-     * yang keluar bersamaan di ambang batas berisiko workspace yatim. Perbaikan
-     * sejati butuh counter owner server-side; dicatat sebagai pekerjaan
-     * pasca-rilis. Sisa alur (baca self → cek → hapus) aman untuk kasus umum.
+     * M6: hapus + guard anti-yatim (owner terakhir tidak boleh keluar) dijalankan
+     * ATOMIK oleh callable `leaveWorkspaceAtomic` di server. Guard lama di klien
+     * (baca self → hitung owner lain → hapus) punya celah TOCTOU & sudah tidak
+     * dipakai; fungsi murni [canLeaveWorkspace] tetap ada untuk tes/UI lain.
+     * Error FAILED_PRECONDITION dari server → [LeaveWorkspaceResult.NEED_OWNER_TRANSFER].
      *
      * Catatan: setelah keluar, data lokal masih ada sampai pemanggil
      * membersihkannya ([MainViewModel.clearLocalData] + hapus PIN lokal).
      */
     suspend fun leaveWorkspace(pin: String): LeaveWorkspaceResult {
-        val uid = currentUid() ?: return LeaveWorkspaceResult.FAILED
+        if (currentUid() == null) return LeaveWorkspaceResult.FAILED
         return try {
-            val membersRef = db().collection(Constants.Collections.FAMILIES).document(pin)
-                .collection(Constants.Collections.MEMBERS)
-            val selfRef = membersRef.document(uid)
-            val self = selfRef.get().await()
-            if (!self.exists()) return LeaveWorkspaceResult.FAILED
-            val myRole = self.getString(Constants.Fields.ROLE) ?: ROLE_MEMBER
-            // Owner: hitung owner LAIN (bukan diri sendiri) untuk guard anti-yatim.
-            val otherOwners = if (myRole == ROLE_OWNER) {
-                membersRef.get().await().documents.count { d ->
-                    d.id != uid && d.getString(Constants.Fields.ROLE) == ROLE_OWNER
-                }
-            } else 0
-            if (!canLeaveWorkspace(myRole, otherOwners)) {
-                return LeaveWorkspaceResult.NEED_OWNER_TRANSFER
-            }
-            selfRef.delete().await()
+            FirebaseFunctions.getInstance()
+                .getHttpsCallable("leaveWorkspaceAtomic")
+                .call(mapOf("familyId" to pin))
+                .await()
             LeaveWorkspaceResult.LEFT
         } catch (e: Exception) {
             Log.w(TAG, "leaveWorkspace gagal: ${e.message}")
-            LeaveWorkspaceResult.FAILED
+            recordFunctionFailure(e)
+            if (isNeedOwnerTransfer(e)) LeaveWorkspaceResult.NEED_OWNER_TRANSFER
+            else LeaveWorkspaceResult.FAILED
         }
     }
 

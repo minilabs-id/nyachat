@@ -24,6 +24,13 @@ class RekapScreenState {
     /** Transaksi yang menunggu konfirmasi dialog hapus (null = tidak ada). */
     var pendingDelete by mutableStateOf<FinancialTransaction?>(null)
 
+    /**
+     * B6: guard transien dialog konfirmasi hapus — tombol dinonaktifkan dan tap
+     * kedua diabaikan sampai aksi hapus selesai. Sengaja TIDAK ikut disimpan di
+     * [Saver] (sifatnya sesaat, seperti [pendingDelete]).
+     */
+    var isDeleteInFlight by mutableStateOf(false)
+
     /** Navigasi bulan (UI-level): null = semua bulan; Pair(tahun, bulan 1..12).
      *  Filter in-memory — banner/donut/riwayat ikut ter-scope. */
     var selectedMonth by mutableStateOf<Pair<Int, Int>?>(null)
@@ -31,15 +38,23 @@ class RekapScreenState {
     /** Filter kategori dari tap baris breakdown (null = semua kategori). */
     var selectedCategory by mutableStateOf<String?>(null)
 
+    /**
+     * M1 (audit UI/UX): posisi scroll riwayat. Disimpan di Saver supaya posisi
+     * tidak hilang saat rotasi; digabung dengan LazyListState yang DI-HOIST ke
+     * MainActivity supaya juga bertahan saat pindah tab Chat ⇄ Rekap.
+     */
+    var firstVisibleItemIndex by mutableStateOf(0)
+
     companion object {
-        /** Saver untuk rememberSaveable — tab/kategori/bulan bertahan lintas tab. */
+        /** Saver untuk rememberSaveable — tab/kategori/bulan/scroll bertahan lintas tab. */
         val Saver = listSaver<RekapScreenState, Any>(
             save = { state ->
                 listOf(
                     state.selectedFilterTab,
                     state.selectedMonth?.first ?: -1,
                     state.selectedMonth?.second ?: -1,
-                    state.selectedCategory ?: ""
+                    state.selectedCategory ?: "",
+                    state.firstVisibleItemIndex
                 )
             },
             restore = { saved ->
@@ -51,6 +66,8 @@ class RekapScreenState {
                     if (year > 0 && month in 1..12) selectedMonth = year to month
                     val category = saved.getOrNull(3) as? String
                     if (!category.isNullOrEmpty()) selectedCategory = category
+                    val scrollIndex = saved.getOrNull(4) as? Int
+                    if (scrollIndex != null && scrollIndex >= 0) firstVisibleItemIndex = scrollIndex
                 }
             }
         )

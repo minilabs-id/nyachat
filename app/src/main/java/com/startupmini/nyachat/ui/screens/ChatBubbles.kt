@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.webkit.MimeTypeMap
-import android.widget.Toast
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -29,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,12 +38,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Circle
 import androidx.compose.material.icons.rounded.OfflineBolt
 import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.Receipt
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -103,10 +106,37 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** Audit A-L4: ukuran ikon status diseragamkan — indikator utama 12dp, centang dalam 8dp. */
+private val StatusIconSize = 12.dp
+private val StatusInnerIconSize = 8.dp
+
+/** Audit A-M6: tinggi placeholder saat foto masih di-decode (dimensi asli baru
+ *  diketahui setelah decode, jadi dipakai tinggi nominal supaya bubble tidak
+ *  "lompat" saat gambar siap). */
+private val MediaLoadingPlaceholderHeight = 200.dp
+
 /** r1.7.0 (chat ephemeral): status pengiriman pesan milik user — dipakai bubble
  *  untuk menampilkan indikator ala WhatsApp: PENDING (jam ⏳, belum ke server),
- *  SYNCED (✓, sudah tersinkron), DELIVERED (✓✓, semua perangkat menerima). */
-enum class DeliveryStatus { PENDING, SYNCED, DELIVERED }
+ *  SYNCED (✓, sudah tersinkron), DELIVERED (✓✓, semua perangkat menerima).
+ *  Audit UX H2: FAILED ditambahkan saat sinkronisasi gagal (bisa dicoba ulang
+ *  lewat menu "Kirim ulang"). */
+enum class DeliveryStatus {
+    PENDING,
+    /** R2-B7: sedang dicoba kirim ulang — indikator sementara, bukan "sukses". */
+    RETRYING,
+    SYNCED,
+    DELIVERED,
+    FAILED
+}
+
+/** Audit UX H3: hasil dekode foto lampiran — LOADING/FAILED dibedakan supaya
+ *  bubble tidak pernah tampil kosong saat gambar belum/gagal dimuat. */
+private sealed interface BubbleImageState {
+    data object None : BubbleImageState
+    data object Loading : BubbleImageState
+    data class Ready(val bitmap: Bitmap) : BubbleImageState
+    data object Failed : BubbleImageState
+}
 
 /** Buka file dokumen terkirim (PDF/invoice) lewat aplikasi pembaca eksternal. */
 internal fun openAttachedFile(context: Context, message: ChatMessage) {
@@ -126,7 +156,10 @@ internal fun openAttachedFile(context: Context, message: ChatMessage) {
         }
         context.startActivity(intent)
     }.onFailure {
-        Toast.makeText(context, context.getString(R.string.chat_file_open_failed), Toast.LENGTH_SHORT).show()
+        // R2-H5: satu kanal umpan balik — Toast lokal dihapus.
+        com.startupmini.nyachat.ui.AppSnackbar.show(
+            context.getString(R.string.chat_file_open_failed)
+        )
     }
 }
 
@@ -208,9 +241,11 @@ fun ChatMessageBubble(
         else -> MaterialTheme.colorScheme.onSurface
     }
 
+    // Audit UX M8: alpha 0.7f dihapus — waktu memakai warna penuh supaya kontras
+    // teks memenuhi WCAG (sebelumnya ~3.5:1 di atas primaryContainer).
     val timeColor = when {
-        isMe -> MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        isMe -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
     val senderLabel = when (message.sender) {
@@ -244,6 +279,44 @@ fun ChatMessageBubble(
     // Label custom accessibility action "Buka menu" — TalkBack tetap bisa membuka
     // menu pesan walau onClick bubble tidak lagi memicunya (audit gestur 2026-08-13).
     val openMenuActionLabel = stringResource(R.string.chat_open_menu_desc)
+    // Audit UX M5/L2 + R2-H9: satu contentDescription ringkas yang juga menyebut
+    // status nyata (pending / dibaca / AI memproses / gagal), bukan sekadar isi.
+    val bubbleBody = message.messageText.takeIf { it.isNotBlank() }
+        ?: message.fileName
+        ?: message.imagePath?.let { stringResource(R.string.chat_image_desc) }
+    val pendingLabel = stringResource(R.string.ux_bubble_pending)
+    val aiProcessingLabel = stringResource(R.string.ux_bubble_ai_processing)
+    val openTransactionLabel = stringResource(R.string.ux_bubble_open_transaction)
+    // Catatan: `ux_bubble_send_failed` tidak tersedia di strings.xml file lain;
+    // padanan yang ada adalah ux_send_failed — tidak menambah resource baru.
+    val sendFailedLabel = stringResource(R.string.ux_send_failed)
+    val hasFinancialBadge = message.isFinancial && message.detectedAmount != null
+    val bubbleDescription = buildString {
+        append(senderLabel)
+        append(", ")
+        append(timeDisplay)
+        if (!bubbleBody.isNullOrBlank()) {
+            append(", ")
+            append(bubbleBody)
+        }
+        if (delivery == DeliveryStatus.PENDING || delivery == DeliveryStatus.RETRYING) {
+            append(", ")
+            append(pendingLabel)
+        }
+        if (isProcessing) {
+            append(", ")
+            append(aiProcessingLabel)
+        }
+        if (delivery == DeliveryStatus.FAILED) {
+            append(", ")
+            append(sendFailedLabel)
+        }
+        val stats = receiptStats
+        if (stats != null && stats.read > 0) {
+            append(", ")
+            append(stringResource(R.string.ux_bubble_read_by, stats.read, stats.totalOthers))
+        }
+    }
 
     // Dekode foto lampiran untuk ditampilkan di bubble (disampling, aman memori).
     // P1 (audit performa 2026-08-12): pakai cache thumbnail media per sesi —
@@ -251,16 +324,22 @@ fun ChatMessageBubble(
     // skipped frames). Key cache = maxDim|path, jadi preview 640px & bubble
     // 1100px dari file sama di-cache terpisah.
     val imagePath = message.imagePath
-    val imageBitmap by produceState<Bitmap?>(
-        initialValue = null,
+    val imageState by produceState<BubbleImageState>(
+        initialValue = if (imagePath == null) BubbleImageState.None else BubbleImageState.Loading,
         key1 = imagePath
     ) {
+        if (imagePath == null) {
+            value = BubbleImageState.None
+            return@produceState
+        }
         value = withContext(Dispatchers.IO) {
-            BitmapCache.decodeMedia(imagePath, 1100)
+            val decoded = BitmapCache.decodeMedia(imagePath, 1100)
+            if (decoded != null) BubbleImageState.Ready(decoded) else BubbleImageState.Failed
         }
     }
-    // Snapshot lokal supaya smart-cast berfungsi (imageBitmap = delegated property).
-    val mediaBitmap = imageBitmap
+    // Snapshot lokal supaya smart-cast berfungsi (imageState = delegated property).
+    val mediaBitmap = (imageState as? BubbleImageState.Ready)?.bitmap
+    val mediaFailed = imageState is BubbleImageState.Failed
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -325,7 +404,7 @@ fun ChatMessageBubble(
                 Text(
                     text = timeDisplay,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -358,12 +437,11 @@ fun ChatMessageBubble(
             color = bubbleColor,
             shadowElevation = 0.dp,
             modifier = Modifier
-                // Media (foto) lebih lebar dari teks — screenshot/nota perlu ruang
-            // baca; teks tetap 300dp agar nyaman dibaca.
-            // r1.7.2 (ukuran tampilan): foto media dipangkas ala WhatsApp —
-            // lebar bubble 300dp & tinggi gambar di-cap 340dp (foto potret
-            // 9:16 → ~191dp lebar, tak menutup layar; landscape selebar bubble).
-            .widthIn(min = 60.dp, max = if (mediaBitmap != null) 280.dp else 300.dp)
+                // Audit A-M6: batas lebar disatukan (300dp loading vs 280dp decoded
+            // dulu bikin bubble "lompat" saat decode selesai). Lebar aktual bubble
+            // media ditentukan kolom konten (A-H2/A-M2 = mediaW), jadi 280dp di sini
+            // hanya plafon — bukan lebar paksa.
+            .widthIn(min = 60.dp, max = 280.dp)
                 // r1.4.0 (lint): lambda overload supaya offset mengikuti state
                 // swipeOffsetX saat berubah (non-lambda hanya dibaca sekali).
                 .offset {
@@ -383,12 +461,27 @@ fun ChatMessageBubble(
                 // dipakai viewer gambar, menu pesan di-expose sebagai custom
                 // accessibility action supaya TalkBack tidak kehilangan akses.
                 .semantics {
-                    customActions = listOf(
-                        CustomAccessibilityAction(openMenuActionLabel) {
+                    // R2-H9: jangan paksa Role.None bila ada ANAK INTERAKTIF
+                    // (viewer gambar ATAU badge finansial yang bisa diketuk) —
+                    // TalkBack harus tetap bisa menjangkau aksi tersebut.
+                    val hasInteractiveChild = onOpenImage != null ||
+                        (hasFinancialBadge && onOpenTransaction != null)
+                    if (!hasInteractiveChild) role = Role.None
+                    contentDescription = bubbleDescription
+                    customActions = buildList {
+                        add(CustomAccessibilityAction(openMenuActionLabel) {
                             onLongPress?.invoke()
                             true
+                        })
+                        // R2-H9: akses eksplisit "Buka transaksi" pada bubble
+                        // teks ber-badge finansial.
+                        if (hasFinancialBadge && onOpenTransaction != null) {
+                            add(CustomAccessibilityAction(openTransactionLabel) {
+                                onOpenTransaction?.invoke()
+                                true
+                            })
                         }
-                    )
+                    }
                 }
                 .then(
                     if (onReply != null) {
@@ -435,7 +528,69 @@ fun ChatMessageBubble(
                 )
                 .testTag("chat_bubble_${message.id}")
         ) {
-            if (mediaBitmap != null) {
+            if (imagePath != null && mediaBitmap == null) {
+                // Audit UX H3: foto belum selesai / gagal di-decode — dulu jalur
+                // ini jatuh ke konten teks dan menghasilkan bubble kosong.
+                // Sekarang tampilkan indikator + caption (atau pesan gagal).
+                val captionText = message.messageText.takeIf { it.isNotBlank() }
+                    ?: stringResource(R.string.ux_image_caption_placeholder)
+                // A-M6: padding 12/8 (sama dengan jalur decoded & teks) dan
+                // placeholder setinggi MediaLoadingPlaceholderHeight supaya
+                // bubble tidak menyusut lalu melonjak saat decode selesai.
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(MediaLoadingPlaceholderHeight),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (mediaFailed) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Warning,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = stringResource(R.string.ux_image_load_failed),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            } else {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = captionText,
+                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                        color = textColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // A-L3: jam tampil juga untuk pesan masuk (failed/loading) —
+                    // footer tidak lagi eksklusif isMe.
+                    MessageFooterRow(
+                        message = message,
+                        timeDisplay = timeDisplay,
+                        timeColor = timeColor,
+                        isProcessing = isProcessing,
+                        isMe = isMe,
+                        delivery = delivery,
+                        receiptStats = receiptStats,
+                        onOpenTransaction = onOpenTransaction,
+                        placeTimeAtStart = !isMe,
+                        showTimeForAll = true,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            } else if (mediaBitmap != null) {
                 // ===== MEDIA MESSAGE (WhatsApp/Telegram): gambar = bubble =====
                 // Layout terpisah dari pesan teks: TANPA padding generik bubble
                 // (14/10dp), gambar mengisi hampir seluruh container, sudut
@@ -455,7 +610,8 @@ fun ChatMessageBubble(
                     onOpenTransaction = onOpenTransaction
                 )
             } else {
-            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            // A-M6: samakan padding dengan jalur loading/decoded (12/8dp).
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 // r1.6.1 (audit pesan): pesan ber-foto dari perangkat lain yang
                 // fotonya belum terunduh di perangkat ini (imageUrl ada di cloud,
                 // file lokal belum ada). Tampilkan placeholder supaya penerima
@@ -479,7 +635,8 @@ fun ChatMessageBubble(
                             Text(
                                 text = " ${stringResource(R.string.chat_photo_placeholder)}",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = textColor.copy(alpha = 0.7f)
+                                // B22: teks memakai warna penuh (kontras WCAG).
+                                color = textColor
                             )
                         }
                     }
@@ -527,10 +684,15 @@ fun ChatMessageBubble(
                 // (mediaBitmap != null) — blok gambar lama di jalur teks tidak
                 // lagi diperlukan (tidak akan pernah ter-render).
                 if (message.messageText.isNotBlank()) {
+                    // A-L2: batasi tinggi bubble untuk URL/emoji panjang — teks
+                    // lengkap tetap ada di contentDescription bubble (bisa disalin
+                    // lewat menu), hanya tampilan yang di-ellipsis.
                     Text(
                         text = message.messageText,
                         style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = textColor
+                        color = textColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -540,7 +702,6 @@ fun ChatMessageBubble(
                 // r1.7.3 (permintaan user): untuk bubble TEKS footer pindah ke
                 // pojok KIRI-bawah (placeTimeAtStart = true); bubble gambar tetap
                 // di kanan-bawah (lihat ChatMediaBubbleContent).
-                val hasFinancialBadge = message.isFinancial && message.detectedAmount != null
                 if (isMe || hasFinancialBadge) {
                     MessageFooterRow(
                         message = message,
@@ -576,7 +737,10 @@ private fun AttachedFileCard(
     val semantic = LocalSemanticColors.current
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = if (isMe) Color.White.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+        // A-H1: dulu latar putih transparan di atas primaryContainer light ≈
+        // #B9F3D3 dengan ikon putih → kontras ~1.25:1. Latar & ikon memakai
+        // onPrimaryContainer (kontras aman) di kedua mode.
+        color = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
         modifier = Modifier
             .widthIn(max = 230.dp)
             .combinedClickable(onClick = { onOpenFile?.invoke() })
@@ -588,7 +752,8 @@ private fun AttachedFileCard(
             Icon(
                 imageVector = Icons.Rounded.PictureAsPdf,
                 contentDescription = null,
-                tint = if (isMe) Color.White else semantic.expense,
+                // A-H1: ikon putih-di-putih diganti onPrimaryContainer (lihat latar).
+                tint = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else semantic.expense,
                 modifier = Modifier.size(22.dp)
             )
             Spacer(modifier = Modifier.width(10.dp))
@@ -651,6 +816,9 @@ private fun FinancialBadge(
     // Badge bisa di-tap untuk membuka transaksi di Rekap — inner clickable
     // menang atas combinedClickable bubble. Label aksesibilitas di-hoist.
     val badgeDesc = stringResource(R.string.chat_open_transaction_desc)
+    // A-M1: modifier area-sentuh minimum DIHAPUS — di jalur footer ia memaksa
+    // wrapper ≥48dp sehingga footer membengkak & baseline jam melayang. Badge
+    // sudah punya clickable + semantics di bawah, jadi tetap dapat diketuk.
     val badgeClickModifier = if (onOpenTransaction != null) {
         Modifier
             .clickable(onClick = onOpenTransaction)
@@ -660,19 +828,21 @@ private fun FinancialBadge(
             }
     } else Modifier
 
-    Surface(
+    Box(modifier = badgeClickModifier.then(modifier)) {
+        Surface(
         // Badge ringkas (2026-08-10): padding ramping + indikator sumber jadi
         // ikon kecil (AI teks 2 huruf / ⚡ heuristik) — bukan teks "heuristik".
         // Badge campuran: warna Surface dibiarkan transparan dan gradien
         // pelangi digambar lewat Modifier.background(brush) — Surface M3 tidak
         // punya param brush, jadi background modifier dipasang paling luar.
-        shape = RoundedCornerShape(8.dp),
-        color = tagBg,
-        modifier = badgeClickModifier
-            .then(if (tagBrush != null) Modifier.background(tagBrush, RoundedCornerShape(8.dp)) else Modifier)
-            .then(modifier)
-            .testTag("financial_badge_${message.id}")
-    ) {
+            shape = RoundedCornerShape(8.dp),
+            color = tagBg,
+            modifier = Modifier
+                // A-M4: batas lebar badge supaya tidak mendorong/menabrak jam.
+                .widthIn(max = 180.dp)
+                .then(if (tagBrush != null) Modifier.background(tagBrush, RoundedCornerShape(8.dp)) else Modifier)
+                .testTag("financial_badge_${message.id}")
+        ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -695,19 +865,26 @@ private fun FinancialBadge(
             // transaksi pertama (tidak men-netting pemasukan vs pengeluaran).
             // Transaksi tunggal tetap "+/- RpX · kategori" seperti sebelumnya.
             val multiCount = message.detectedCount ?: 0
+            // A-M4: maxLines=1 + Ellipsis mencegah wrap 2 baris yang menabrak
+            // baseline waktu di footer.
             if (multiCount > 1) {
                 Text(
                     text = "$multiCount transaksi · $formatRp",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
-                    color = tagColor
+                    color = tagColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             } else {
+                val categoryLabel = message.detectedCategory?.take(18).orEmpty()
                 Text(
-                    text = "${if (isIncome) "+" else "-"} $formatRp · ${message.detectedCategory}",
+                    text = "${if (isIncome) "+" else "-"} $formatRp · $categoryLabel",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
-                    color = tagColor
+                    color = tagColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             // M7: indikator sumber deteksi (AI vs heuristik offline).
@@ -724,19 +901,21 @@ private fun FinancialBadge(
                             text = stringResource(R.string.badge_detected_ai),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = tagColor.copy(alpha = 0.7f),
+                            // B22: "AI" & heuristik memakai warna penuh.
+                            color = tagColor,
                             modifier = Modifier.semantics { contentDescription = indicatorDesc }
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Rounded.OfflineBolt,
                             contentDescription = stringResource(R.string.badge_detected_heuristic_desc),
-                            tint = tagColor.copy(alpha = 0.7f),
+                            tint = tagColor,
                             modifier = Modifier.size(12.dp)
                         )
                     }
                 }
             }
+        }
         }
     }
 }
@@ -762,7 +941,20 @@ private fun ChatMediaBubbleContent(
     onOpenFile: (() -> Unit)?,
     onOpenTransaction: (() -> Unit)?
 ) {
-    Column {
+    // A-M2: satu faktor skala untuk LEBAR & TINGGI — terkecil dari plafon
+    // 280dp (lebar) / 340dp (tinggi), tanpa upscale. Foto near-square kini tidak
+    // letterbox (dulu lebar dipaksa 280dp tapi tinggi 340dp), foto potret tidak
+    // menyisip strip kosong.
+    val w = imageBitmap.width.coerceAtLeast(1).toFloat()
+    val h = imageBitmap.height.coerceAtLeast(1).toFloat()
+    val fitScale = minOf(280f / w, 340f / h, 1f)
+    val mediaW = w * fitScale
+    val mediaH = h * fitScale
+
+    // A-H2: kunci lebar kolom ke lebar foto. Caption/footer fillMaxWidth di
+    // dalamnya mengikuti foto — bukan memaksa bubble 280dp dan meninggalkan
+    // strip kosong di samping foto potret.
+    Column(modifier = Modifier.width(mediaW.dp)) {
         // Kutipan balasan (swipe kanan / menu Balas) — TANPA panel bersarang:
         // garis aksen kiri (gaya Telegram) supaya pola "panel di dalam panel"
         // tidak hidup lagi di bubble media.
@@ -813,23 +1005,10 @@ private fun ChatMediaBubbleContent(
             Spacer(modifier = Modifier.height(6.dp))
         }
 
-        // Gambar — EDGE-TO-EDGE: lebar mengikuti bubble, tinggi mengikuti rasio,
-        // TANPA clip sendiri (sudut di-clip shape Surface). Tidak ada frame/
-        // padding di sekeliling gambar.
-        //
-        // r1.7.2 (fix ukuran tampilan): ukuran gambar DIHITUNG eksplisit dari
-        // rasio asli dengan cap max 280dp lebar / 340dp tinggi:
-        //   - foto potret (rasio < 1): tinggi 340dp, lebar mengikuti rasio
-        //     (9:16 → ~191dp, ala WhatsApp; tak menutup layar).
-        //   - foto lanskap/kotak (rasio ≥ 1): lebar 280dp penuh, tinggi proporsional.
-        // Ukuran di-set eksplisit (width/height) sehingga proporsi terjaga TANPA
-        // letterbox/band — (fillMaxWidth+heightIn+aspectRatio sebelumnya membuat
-        // rasio pecah → strip bubble di samping foto potret).
-        // Guard rasio ekstrem (bitmap 0/1px) — rasio wajib finite & > 0.
-        val mediaAspect = imageBitmap.width.toFloat() /
-            imageBitmap.height.coerceAtLeast(1).toFloat()
-        val mediaW = if (mediaAspect >= 1f) 280f else 340f * mediaAspect
-        val mediaH = if (mediaAspect >= 1f) 280f / mediaAspect else 340f
+        // Gambar — EDGE-TO-EDGE di dalam kolom selebar mediaW (A-H2/A-M2):
+        // Image memakai width(mediaW.dp).height(mediaH.dp) + contentScale=Fit,
+        // sehingga foto mengisi bubble tanpa letterbox maupun strip kosong.
+        // Sudut di-clip oleh shape Surface (radius tunggal, bukan "frame").
 
         // r1.7.0 (L5): gambar MURNI milik user (tanpa caption/badge/processing)
         // menampilkan waktu ala WhatsApp — OVERLAY di pojok kanan-bawah gambar
@@ -848,8 +1027,12 @@ private fun ChatMediaBubbleContent(
                 contentScale = ContentScale.Fit
             )
             if (overlayTime) {
+                // A-M3: teruskan status ke overlay — gambar murni milik sendiri
+                // ikut dapat pending/titik/centang, bukan cuma jam.
                 TimeChipOverlay(
                     timeDisplay = timeDisplay,
+                    delivery = delivery,
+                    receiptStats = receiptStats,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(6.dp)
@@ -865,10 +1048,13 @@ private fun ChatMediaBubbleContent(
         if (hasCaption || hasBadge || isProcessing) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 if (hasCaption) {
+                    // A-L2: samakan dengan reply/file text (2 baris + ellipsis).
                     Text(
                         text = message.messageText,
                         style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = textColor
+                        color = textColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
                 MessageFooterRow(
@@ -912,6 +1098,9 @@ private fun ColumnScope.MessageFooterRow(
     receiptStats: ReceiptStats?,
     onOpenTransaction: (() -> Unit)?,
     placeTimeAtStart: Boolean = false,
+    // A-L3: jalur loading/failed menampilkan jam juga untuk pesan masuk
+    // (tanpa indikator status, yang tetap eksklusif pesan milik sendiri).
+    showTimeForAll: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -931,15 +1120,19 @@ private fun ColumnScope.MessageFooterRow(
             )
             Spacer(modifier = Modifier.width(8.dp))
         }
-        if (isMe) {
-            // r1.7.3 (permintaan user): indikator status di KIRI waktu —
-            // [lingkaran] [waktu], konsisten untuk bubble teks & gambar.
-            MessageStatusIndicators(
-                delivery = delivery,
-                receiptStats = receiptStats,
-                tint = timeColor,
-                modifier = Modifier.padding(end = 3.dp)
-            )
+        if (isMe || showTimeForAll) {
+            // A-L3: indikator status tetap hanya untuk pesan milik sendiri;
+            // jam ikut tampil untuk pesan masuk saat showTimeForAll = true.
+            if (isMe) {
+                // r1.7.3 (permintaan user): indikator status di KIRI waktu —
+                // [lingkaran] [waktu], konsisten untuk bubble teks & gambar.
+                MessageStatusIndicators(
+                    delivery = delivery,
+                    receiptStats = receiptStats,
+                    tint = timeColor,
+                    modifier = Modifier.padding(end = 3.dp)
+                )
+            }
             Text(
                 text = timeDisplay,
                 style = MaterialTheme.typography.labelSmall,
@@ -955,18 +1148,36 @@ private fun ColumnScope.MessageFooterRow(
  * foto terang. Non-clickable (gambar tetap satu area tap/tekan).
  */
 @Composable
-private fun TimeChipOverlay(timeDisplay: String, modifier: Modifier = Modifier) {
+private fun TimeChipOverlay(
+    timeDisplay: String,
+    delivery: DeliveryStatus?,
+    receiptStats: ReceiptStats?,
+    modifier: Modifier = Modifier
+) {
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = Color.Black.copy(alpha = 0.35f),
+        // B23: scrim dinaikkan ke ≥0.6 supaya jam terbaca di foto terang.
+        color = Color.Black.copy(alpha = 0.65f),
         modifier = modifier
     ) {
-        Text(
-            text = timeDisplay,
-            style = MaterialTheme.typography.labelSmall,
-            color = Color.White,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-        )
+        // A-M3: indikator status + jam dalam SATU Row & scrim yang sama —
+        // belum ada status (delivery null) → Row tetap hanya berisi jam.
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MessageStatusIndicators(
+                delivery = delivery,
+                receiptStats = receiptStats,
+                tint = Color.White,
+                modifier = Modifier.padding(end = 3.dp)
+            )
+            Text(
+                text = timeDisplay,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White
+            )
+        }
     }
 }
 
@@ -974,6 +1185,7 @@ private fun TimeChipOverlay(timeDisplay: String, modifier: Modifier = Modifier) 
  * r1.7.1 (tanda terima/baca #3): indikator status pesan milik user di pojok
  * kanan-bawah bubble — pengganti centang ✓/✓✓ (r1.7.0):
  *  - PENDING          → jam (belum punya cloudId / masih diantre).
+ *  - RETRYING (R2-B7) → spinner kecil saat kirim ulang berjalan.
  *  - SYNCED + statistik → deretan titik per anggota LAIN: outline abu =
  *    diterima, isi hijau = dibaca (urutan = urutan yang membaca).
  *  - SYNCED + allRead → SATU titik pelangi (semua anggota lain sudah membaca).
@@ -989,12 +1201,37 @@ private fun MessageStatusIndicators(
     modifier: Modifier = Modifier
 ) {
     val d = delivery ?: return
+    // Audit R2-C6: token semantik mode-aware (bukan literal hardcode).
+    val semantic = LocalSemanticColors.current
+    // Audit UX H2: sinkron gagal → indikator peringatan + label "Gagal terkirim"
+    // (menu "Kirim ulang" tersedia di overflow bubble).
+    if (d == DeliveryStatus.FAILED) {
+        Icon(
+            imageVector = Icons.Rounded.Warning,
+            contentDescription = stringResource(R.string.ux_send_failed),
+            tint = MaterialTheme.colorScheme.error,
+            modifier = modifier.size(StatusIconSize)
+        )
+        return
+    }
     if (d == DeliveryStatus.PENDING) {
         Icon(
             imageVector = Icons.Rounded.Schedule,
             contentDescription = stringResource(R.string.chat_info_pending_desc),
-            tint = tint,
-            modifier = modifier.size(13.dp)
+            tint = semantic.receiptPending,
+            modifier = modifier.size(StatusIconSize)
+        )
+        return
+    }
+    if (d == DeliveryStatus.RETRYING) {
+        // R2-B7: indikator sementara saat kirim ulang berjalan — jangan tampil
+        // sebagai "terkirim" sampai syncMessage benar-benar selesai.
+        CircularProgressIndicator(
+            color = tint,
+            strokeWidth = 2.dp,
+            modifier = modifier
+                .size(StatusIconSize)
+                .semantics { contentDescription = stringResource(R.string.ux_resend_pending) }
         )
         return
     }
@@ -1002,24 +1239,30 @@ private fun MessageStatusIndicators(
     if (stats.allRead) {
         // Semua anggota lain sudah membaca → titik pelangi gradien (merah →
         // oranye → hijau → biru), kontras cukup di bubble terang/gelap.
-        Icon(
-            imageVector = Icons.Rounded.Circle,
-            contentDescription = stringResource(R.string.chat_info_rainbow_desc),
-            tint = Color.Transparent,
-            modifier = modifier
-                .size(11.dp)
-                .background(
-                    brush = Brush.linearGradient(
-                        listOf(
-                            Color(0xFFF44336),
-                            Color(0xFFFF9800),
-                            Color(0xFF4CAF50),
-                            Color(0xFF2196F3)
-                        )
-                    ),
-                    shape = CircleShape
-                )
-        )
+        // Audit UX M8: bentuk centang di tengah membedakan "semua dibaca"
+        // dari "diterima" tanpa bergantung pada warna saja.
+        Box(
+            modifier = modifier.size(StatusIconSize),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Circle,
+                contentDescription = stringResource(R.string.chat_info_rainbow_desc),
+                tint = Color.Transparent,
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        brush = Brush.linearGradient(semantic.rainbowSegment),
+                        shape = CircleShape
+                    )
+            )
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(StatusInnerIconSize)
+            )
+        }
         return
     }
     // Deretan titik: totalOthers titik (>=1), `read` pertama berisi hijau.
@@ -1039,21 +1282,25 @@ private fun MessageStatusIndicators(
             // Ikon titik dekoratif (deskripsi gabungan ada di Row di atas) —
             // TalkBack tidak membacakan satu-per-satu.
             if (isRead) {
+                // Audit UX M8: "dibaca" memakai BENTUK centang, bukan sekadar
+                // warna hijau — tetap terbaca oleh pengguna buta warna.
                 Icon(
-                    imageVector = Icons.Rounded.Circle,
+                    imageVector = Icons.Rounded.Check,
                     contentDescription = null,
-                    tint = Color(0xFF4CAF50),
-                    modifier = Modifier.size(8.dp)
+                    // B23/C6: token hijau mode-aware (kontras ≥3:1), bentuk
+                    // centang tetap dipertahankan.
+                    tint = semantic.receiptRead,
+                    modifier = Modifier.size(StatusIconSize)
                 )
             } else {
                 // r1.7.3 (permintaan user): indikator "diterima" memakai lingkaran
                 // PENUH (bukan ring/outline seperti sebelumnya) — warna waktu
-                // membedakannya dari titik hijau "dibaca".
+                // membedakannya dari centang hijau "dibaca".
                 Icon(
                     imageVector = Icons.Rounded.Circle,
                     contentDescription = null,
-                    tint = tint,
-                    modifier = Modifier.size(8.dp)
+                    tint = semantic.receiptPending,
+                    modifier = Modifier.size(StatusIconSize)
                 )
             }
         }

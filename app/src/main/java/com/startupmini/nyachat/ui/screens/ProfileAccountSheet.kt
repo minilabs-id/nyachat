@@ -1,6 +1,8 @@
 package com.startupmini.nyachat.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,11 +10,15 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Badge
@@ -31,16 +37,23 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.startupmini.nyachat.Constants
@@ -80,6 +93,20 @@ fun ProfileAccountSheet(
     var showSourceDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
 
+    // B19/B13: fokus kembali ke baris "Nama" setelah dialog ubah nama tutup.
+    val nameRowFocusRequester = remember { FocusRequester() }
+    var restoreNameFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(restoreNameFocus) {
+        if (restoreNameFocus) {
+            nameRowFocusRequester.requestFocus()
+            restoreNameFocus = false
+        }
+    }
+    fun dismissRename() {
+        showRenameDialog = false
+        restoreNameFocus = true
+    }
+
     // Audit motion (2026-08-12): onDismissRequest juga lewat dismiss() —
     // gesture swipe/scrim/back ikut turun ke bawah, konsisten dengan sheet lain.
     fun dismiss() {
@@ -93,14 +120,35 @@ fun ProfileAccountSheet(
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         containerColor = MaterialTheme.colorScheme.surface,
+        // B-M20: handle bawaan dimatikan — custom 36x4dp handle di konten.
+        dragHandle = null,
         contentWindowInsets = { WindowInsets(0) },
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // B-M21: satu batas tinggi sheet 640dp dengan sheet lain,
+                // B-M18: navbar inset manual (contentWindowInsets dinolkan).
+                .heightIn(max = 640.dp)
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
+            // B-M20: drag handle 36x4dp — samakan dengan sheet lain.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+                )
+            }
             // Header
             Row(
                 modifier = Modifier
@@ -129,13 +177,21 @@ fun ProfileAccountSheet(
                     .padding(vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // C16: displaySmall (36sp) meluap di lingkaran 96dp saat
+                // fontScale > 1.5 — turunkan ke titleLarge agar inisial tetap
+                // muat tanpa terpotong.
+                val avatarTextStyle = if (LocalDensity.current.fontScale > 1.5f) {
+                    MaterialTheme.typography.titleLarge
+                } else {
+                    MaterialTheme.typography.displaySmall
+                }
                 AvatarImage(
                     name = displayName,
                     size = 96,
                     photoPath = avatarPath,
                     backgroundColor = MaterialTheme.colorScheme.primaryContainer,
                     textColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    textStyle = MaterialTheme.typography.displaySmall
+                    textStyle = avatarTextStyle
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
@@ -201,7 +257,8 @@ fun ProfileAccountSheet(
                 icon = Icons.Rounded.Badge,
                 title = stringResource(R.string.profile_name_title),
                 subtitle = displayName,
-                onClick = { showRenameDialog = true }
+                onClick = { showRenameDialog = true },
+                focusRequester = nameRowFocusRequester
             )
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -214,7 +271,13 @@ fun ProfileAccountSheet(
             onDismissRequest = { showSourceDialog = false },
             title = { Text(stringResource(R.string.profile_photo_title)) },
             text = {
-                Column {
+                // B-M14: opsi sumber foto bisa melebihi tinggi dialog di layar
+                // 320dp / fontScale besar — bungkus dengan area scroll.
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
                     SourceOption(
                         title = stringResource(R.string.profile_photo_google),
                         subtitle = stringResource(R.string.profile_photo_google_desc),
@@ -267,9 +330,13 @@ fun ProfileAccountSheet(
 
     // Dialog ubah nama
     if (showRenameDialog) {
-        var nameText by remember { mutableStateOf(displayName) }
+        // F21: draf nama tidak hilang saat rotasi saat dialog terbuka.
+        var nameText by rememberSaveable { mutableStateOf(displayName) }
+        // B19/B13: fokus langsung ke field saat dialog muncul (tanpa delay).
+        val nameFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) { nameFocusRequester.requestFocus() }
         AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
+            onDismissRequest = ::dismissRename,
             title = { Text(stringResource(R.string.profile_name_dialog_title)) },
             text = {
                 Column {
@@ -279,7 +346,16 @@ fun ProfileAccountSheet(
                         label = { Text(stringResource(R.string.profile_name_hint)) },
                         singleLine = true,
                         isError = nameText.isBlank(),
-                        modifier = Modifier.fillMaxWidth()
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            if (nameText.isNotBlank()) {
+                                onRename(nameText.trim())
+                                dismissRename()
+                            }
+                        }),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(nameFocusRequester)
                     )
                     if (nameText.isBlank()) {
                         Text(
@@ -296,14 +372,19 @@ fun ProfileAccountSheet(
                     enabled = nameText.isNotBlank(),
                     onClick = {
                         onRename(nameText.trim())
-                        showRenameDialog = false
-                    }
+                        dismissRename()
+                    },
+                    // B28: target sentuh minimal 48dp.
+                    modifier = Modifier.heightIn(min = 48.dp)
                 ) {
                     Text(stringResource(R.string.action_save))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) {
+                TextButton(
+                    onClick = ::dismissRename,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
                     Text(stringResource(R.string.action_cancel))
                 }
             }
@@ -317,13 +398,15 @@ private fun ProfileRow(
     icon: ImageVector,
     title: String,
     subtitle: String? = null,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 56.dp)
             .clickable(onClick = onClick)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

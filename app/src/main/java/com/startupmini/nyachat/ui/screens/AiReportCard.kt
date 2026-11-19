@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -24,19 +25,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
-import com.startupmini.nyachat.ui.theme.AiBlue
 import com.startupmini.nyachat.ui.theme.LocalSemanticColors
 
 // Kartu insight AI + aksi laporan (bulanan/audit) — diekstrak dari RekapScreen.kt
@@ -55,6 +56,9 @@ fun InsightsAiCard(
     onGenerateAudit: () -> Unit,
     isMonthlyLoading: Boolean,
     onGenerateMonthly: () -> Unit,
+    // B17: banner transparansi saat tidak ada jalur AI aktif (opsional supaya
+    // pemanggil lama/snapshot test tetap kompatibel).
+    isOffline: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val semantic = LocalSemanticColors.current
@@ -97,6 +101,36 @@ fun InsightsAiCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            // B17: chip/banner WARNING — bukan paragraf biasa. Memakai teks
+            // persis R.string.ux_ai_offline_notice (sama dengan dialog laporan).
+            if (isOffline) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.ux_ai_offline_notice),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
 
@@ -150,19 +184,19 @@ fun InsightsAiCard(
                         stringResource(R.string.rekap_monthly_action),
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        // B-L: maxLines tanpa overflow memotong teks mendadak.
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 Button(
                     onClick = onGenerateAudit,
-                    // Audit warna (2026-08-12): container AiBlue FIXED di kedua
-                    // mode (bukan primary tema — dark onPrimary #00381F di atas
-                    // #0066FF cuma 3.64:1, gagal AA). ContentColor putih eksplisit
-                    // → label & spinner konsisten, 4.65:1 di light & dark.
+                    // B-M24: AiBlue FIXED cuma ~3.4:1 di dark mode — pakai
+                    // aiAccent mode-aware + content aiOnContainer (AA di dua mode).
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = AiBlue,
-                        contentColor = Color.White
+                        containerColor = semantic.aiAccent,
+                        contentColor = semantic.aiOnContainer
                     ),
                     enabled = !isAuditLoading,
                     shape = RoundedCornerShape(Constants.Ui.CORNER_M.dp),
@@ -184,7 +218,9 @@ fun InsightsAiCard(
                         stringResource(R.string.rekap_ai_action),
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        // B-L: maxLines tanpa overflow memotong teks mendadak.
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }

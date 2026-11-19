@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [r1.7.4] - 2026-11-20 (audit keamanan, UX & UI visual)
+
+- **Keamanan (E2EE):** `e2eeKeys` kini diikat ke uid/owner + versi monoton; wrap
+  rusak memicu rotasi keypair; grup key dirotasi saat anggota dikeluarkan dengan
+  epoch dan propagasi ke semua perangkat; AAD mengikat ciphertext konten.
+- **Keamanan (server):** `plan` tidak lagi bisa ditulis klien (callable
+  `setWorkspacePlan` + entitlement); PIN dipesan lewat `reservePin`; throttle PIN
+  & counter anggota/owner ditegakkan di Cloud Function; APK update diverifikasi
+  tanda tangannya (fail-closed).
+- **UX/UI:** handoff notifikasi ke chat/workspace yang benar; satu kanal snackbar;
+  hasil operasi tidak lagi dilaporkan sukses palsu; aksesibilitas (TalkBack,
+  reduced-motion, target sentuh, kontras); perbaikan geometri bubble/media,
+  PIN 8 digit, sheet & dialog responsif; golden Roborazzi dark-mode & 320dp.
+- **Catatan deploy:** wajib `-PapkCertSha256=<fingerprint>` untuk build release,
+  provision `entitlements/{uid}`, dan TTL untuk koleksi `rateLimits`.
+
 ## [r1.7.0] - 2026-08-18 (chat end-to-end terenkripsi · ephemeral + centang ✓/✓✓ · kompresi foto · audit pesan antar perangkat)
 - **Chat End-to-End Terenkripsi (r1.7.0)**: pesan & transaksi dienkripsi AES-GCM
   di perangkat PENGIRIM sebelum naik ke server; kunci AES dibungkus kunci publik

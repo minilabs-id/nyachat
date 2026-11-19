@@ -3,6 +3,8 @@ package com.startupmini.nyachat.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import com.startupmini.nyachat.data.local.FinancialTransaction
 import com.startupmini.nyachat.data.remote.GitHubRelease
@@ -48,4 +50,65 @@ class MainDialogController {
     // Progres unduhan APK 0..1 (hanya bermakna saat isDownloadingUpdate).
     var updateProgress by mutableStateOf(0f)
     var updateMessage by mutableStateOf<String?>(null)
+    // R2-H4/C7: loading saat cek update & jenis pesan dialog update (error vs info).
+    var isCheckingUpdate by mutableStateOf(false)
+    var updateMessageIsError by mutableStateOf(false)
+
+    companion object {
+        /**
+         * B1: dialog yang memuat input tidak boleh hilang saat rotasi. Field yang
+         * tidak serializable ([editTarget], [workspaceChoices], [updateInfo], dsb.)
+         * sengaja dilewat — state transien itu boleh di-reset.
+         * Triple disimpan sebagai 3 String (empty = null) agar listSaver tetap
+         * bertipe List<Any> (non-null).
+         */
+        val Saver: Saver<MainDialogController, List<Any>> = listSaver(
+            save = { c ->
+                listOf<Any>(
+                    c.showAddDialog,
+                    c.chatResetTrigger,
+                    c.resetChatOnDialogClose,
+                    c.showSettingsSheet,
+                    c.showProfileAccount,
+                    c.showManageMembers,
+                    c.showGeminiKeyDialog,
+                    c.showLogoutDialog,
+                    c.showOpenRouterKeyDialog,
+                    c.showConfirmClearDialog,
+                    c.showLeaveWorkspaceDialog,
+                    c.showPinDialog,
+                    c.pendingPinConnect?.first ?: "",
+                    c.pendingPinConnect?.second ?: "",
+                    c.pendingPinConnect?.third ?: "",
+                    c.connectGate?.first ?: "",
+                    c.connectGate?.second ?: "",
+                    c.connectGate?.third ?: ""
+                )
+            },
+            restore = { saved ->
+                MainDialogController().apply {
+                    showAddDialog = saved[0] as Boolean
+                    chatResetTrigger = saved[1] as Int
+                    resetChatOnDialogClose = saved[2] as Boolean
+                    showSettingsSheet = saved[3] as Boolean
+                    showProfileAccount = saved[4] as Boolean
+                    showManageMembers = saved[5] as Boolean
+                    showGeminiKeyDialog = saved[6] as Boolean
+                    showLogoutDialog = saved[7] as Boolean
+                    showOpenRouterKeyDialog = saved[8] as Boolean
+                    showConfirmClearDialog = saved[9] as Boolean
+                    showLeaveWorkspaceDialog = saved[10] as Boolean
+                    showPinDialog = saved[11] as Boolean
+                    val pendingPin = saved[12] as String
+                    pendingPinConnect = if (pendingPin.isEmpty()) null else Triple(
+                        pendingPin, saved[13] as String, saved[14] as String
+                    )
+                    val gatePin = saved[15] as String
+                    connectGate = if (gatePin.isEmpty()) null else Triple(
+                        gatePin, saved[16] as String, saved[17] as String
+                    )
+                }
+            }
+        )
+    }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,9 +23,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -34,14 +37,20 @@ import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.analytics.MonthlyAnalytics
 import com.startupmini.nyachat.data.local.FinancialTransaction
+import com.startupmini.nyachat.data.remote.GeminiService
 import com.startupmini.nyachat.data.remote.SyncStatus
+import com.startupmini.nyachat.ui.AppSnackbar
 import com.startupmini.nyachat.ui.theme.LocalSemanticColors
+import com.startupmini.nyachat.ui.theme.Motion
 import com.startupmini.nyachat.ui.util.TransactionRow
 import com.startupmini.nyachat.ui.util.buildTransactionRows
 import com.startupmini.nyachat.ui.util.idrCurrencyFormat
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import kotlinx.coroutines.flow.distinctUntilChanged
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.launch
 
 /**
  * Layar Rekap — ORKESTRASI setelah dekomposisi TASK-1.2 (awalnya 1442 baris):
@@ -74,10 +83,21 @@ fun RekapScreen(
     syncStatus: SyncStatus = SyncStatus.SYNCED,
     // 3.8: waktu terakhir sinkron berhasil — label "Tersinkron · HH:mm" di banner.
     lastSyncedAtMillis: Long? = null,
-    insights: List<String> = emptyList()
+    insights: List<String> = emptyList(),
+    // M1: LazyListState DI-HOIST dari MainActivity (AnimatedContent tidak
+    // menghancurkan instance saat pindah tab) & posisinya juga disimpan di
+    // RekapScreenState.Saver untuk bertahan saat rotasi.
+    listState: LazyListState = rememberLazyListState()
 ) {
     val semantic = LocalSemanticColors.current
     val categoryColors = semantic.categoryPalette
+
+    // B6: jalur konfirmasi hapus memakai scope lokal — async → AppSnackbar → tutup.
+    val deleteScope = rememberCoroutineScope()
+    val deleteDoneLabel = stringResource(R.string.chat_tx_deleted)
+    // B17: kartu AI perlu tahu apakah tidak ada jalur AI aktif untuk menampilkan
+    // banner offline (teks resmi ux_ai_offline_notice ada di AiReportCard).
+    val isAiOffline = remember { !GeminiService.isAiAvailable() }
 
     // Navigasi bulan (UI-level): null = semua bulan; Pair(tahun, bulan 1..12).
     // Filter in-memory — banner/donut/riwayat ikut ter-scope tanpa mengubah ViewModel.
@@ -156,8 +176,22 @@ fun RekapScreen(
         }
     }
 
+    // M1: pulihkan posisi scroll dari state yang di-hoist (rotasi), lalu simpan
+    // balik setiap kali item teratas berubah (tab switch memakai instance yang
+    // sama sehingga tidak perlu scroll ulang).
+    LaunchedEffect(Unit) {
+        val saved = state.firstVisibleItemIndex
+        if (saved > 0 && listState.firstVisibleItemIndex != saved) {
+            listState.scrollToItem(saved)
+        }
+    }
+    LaunchedEffect(Unit) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { state.firstVisibleItemIndex = it }
+    }
+
     // Chip saldo di stickyHeader muncul saat banner ter-scroll keluar viewport (item 2).
-    val listState = rememberLazyListState()
     val bannerVisible by remember {
         derivedStateOf { listState.layoutInfo.visibleItemsInfo.any { it.key == "balance_banner" } }
     }
@@ -167,6 +201,9 @@ fun RekapScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
+                // Catatan: scrollbar tidak ditambahkan — API Foundation 1.11.4
+                // (BOM 2026.06.01) tidak menyediakan Modifier.verticalScrollbar;
+                // indikator posisi ngintip dari gestur scroll native Android.
                 .background(MaterialTheme.colorScheme.background),
             contentPadding = PaddingValues(bottom = 90.dp, top = 16.dp, start = 16.dp, end = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -188,19 +225,21 @@ fun RekapScreen(
                         totalExpense = displayExpense,
                         balance = balance,
                         syncStatus = syncStatus,
-                        lastSyncedAtMillis = lastSyncedAtMillis
+                        lastSyncedAtMillis = lastSyncedAtMillis,
+                        currencyFormat = currencyFormat
                     )
                 }
             }
 
             // 2. Category Breakdown Section (Visual Analytics)
             if (categoryTotals.isNotEmpty()) {
-                item {
+                item(key = "category_breakdown") {
                     RekapCategoryBreakdown(
                         categoryTotals = categoryTotals,
                         totalExpense = displayExpense,
                         colors = categoryColors,
                         trendByCategory = trendByCategory,
+                        currencyFormat = currencyFormat,
                         selectedCategory = state.selectedCategory,
                         onCategoryClick = { category ->
                             // Tap baris = filter riwayat per kategori;
@@ -230,7 +269,19 @@ fun RekapScreen(
 
             // 4. Transactions List or Empty State
             if (filteredTransactions.isEmpty()) {
-                item { RekapEmptyState() }
+                // H3: bedakan "benar-benar kosong" vs "tidak ada hasil filter".
+                item(key = "rekap_empty_state") {
+                    RekapEmptyState(
+                        isFiltered = state.selectedCategory != null ||
+                            state.selectedMonth != null ||
+                            state.selectedFilterTab != 0,
+                        onClearFilter = {
+                            state.selectedCategory = null
+                            state.selectedMonth = null
+                            state.selectedFilterTab = 0
+                        }
+                    )
+                }
             } else {
                 // Riwayat dikelompokkan per hari — header tanggal disisipkan tiap
                 // pergantian hari (audit P1.3, helper di ui/util/DateLabels.kt).
@@ -249,7 +300,9 @@ fun RekapScreen(
                             transaction = row.transaction,
                             onDelete = { state.pendingDelete = row.transaction },
                             onEdit = { onEditTransaction(row.transaction) },
-                            modifier = Modifier.animateItem()
+                            currencyFormat = currencyFormat,
+                            // L6: hormati reduced-motion (animasi item dimatikan).
+                            modifier = if (Motion.reducedMotion) Modifier else Modifier.animateItem()
                         )
                     }
                 }
@@ -257,13 +310,14 @@ fun RekapScreen(
 
             // 5. Kartu gabungan Insight lokal + aksi AI (audit P1.3): dipindah ke
             // bawah riwayat — hierarki utama (saldo → analitik → riwayat) didahulukan.
-            item {
+            item(key = "ai_insights_card") {
                 InsightsAiCard(
                     insights = insights,
                     isAuditLoading = isAuditLoading,
                     onGenerateAudit = onGenerateAudit,
                     isMonthlyLoading = isMonthlyLoading,
-                    onGenerateMonthly = onGenerateMonthly
+                    onGenerateMonthly = onGenerateMonthly,
+                    isOffline = isAiOffline
                 )
             }
         }
@@ -271,21 +325,38 @@ fun RekapScreen(
         // Konfirmasi hapus transaksi
         state.pendingDelete?.let { tx ->
             AlertDialog(
-                onDismissRequest = { state.pendingDelete = null },
+                // B6: gesture/back juga ikut kena guard — jangan tutup dialog
+                // selagi hapus masih berjalan.
+                onDismissRequest = {
+                    if (!state.isDeleteInFlight) state.pendingDelete = null
+                },
                 title = { Text(stringResource(R.string.rekap_delete_title)) },
                 text = { Text(stringResource(R.string.rekap_delete_message)) },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            onDeleteTransaction(tx)
-                            state.pendingDelete = null
-                        }
+                            if (state.isDeleteInFlight) return@TextButton
+                            state.isDeleteInFlight = true
+                            deleteScope.launch {
+                                onDeleteTransaction(tx)
+                                // Feedback lewat SATU kanal global (B6). Kegagalan
+                                // diumumkan ViewModel lewat operationFailed →
+                                // AppSnackbar ux_save_failed + Coba lagi.
+                                AppSnackbar.show(deleteDoneLabel)
+                                state.pendingDelete = null
+                                state.isDeleteInFlight = false
+                            }
+                        },
+                        enabled = !state.isDeleteInFlight
                     ) {
                         Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { state.pendingDelete = null }) {
+                    TextButton(
+                        onClick = { state.pendingDelete = null },
+                        enabled = !state.isDeleteInFlight
+                    ) {
                         Text(stringResource(R.string.action_cancel))
                     }
                 }
@@ -308,7 +379,8 @@ fun RekapScreen(
             ),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(20.dp)
+                // B-M4: samakan dengan contentPadding horizontal (16.dp).
+                .padding(16.dp)
                 .testTag("fab_add_transaction")
         ) {
             Icon(imageVector = Icons.Rounded.Add, contentDescription = stringResource(R.string.rekap_fab_desc))

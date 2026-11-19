@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- H4/M10 (audit 2026-11-19): REQUEST_INSTALL_PACKAGES HANYA diperlukan
+         untuk update in-app yang sudah DIVERSIFIKASI tanda tangannya. Sebelum
+         install, GitHubUpdateChecker.verifyApkSignature() mencocokkan SHA-256
+         sertifikat APK dengan BuildConfig.APK_CERT_SHA256 (fail-closed bila
+         kosong). JANGAN dihapus — itu memutus fitur update; jangan pula
+         menambahkan jalur install lain yang melewati verifikasi ini. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 3.7: notifikasi chat real-time (Android 13+ runtime permission) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -11,7 +17,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Update in-app: download APK dari GitHub Release lalu pasang langsung di SEMUA
          build (debug & release) — distribusi lewat GitHub Release, bukan Play Store.
-         Di Android 8+ tanpa permission ini ACTION_VIEW package-archive ditolak. -->
+         Di Android 8+ tanpa REQUEST_INSTALL_PACKAGES ACTION_VIEW package-archive
+         ditolak. Lihat komentar pada deklarasi permission di atas (H4/M10). -->
 
     <application
         android:allowBackup="false"

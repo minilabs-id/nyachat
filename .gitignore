@@ -37,6 +37,9 @@ node_modules/
 # Data lokal agent/editor FreeBuff (jangan pernah di-commit)
 .freebuff/
 .artifact/
+
+# State sesi/agent OpenCode (jangan pernah di-commit)
+.minicode/
 *.db
 *.db-shm
 *.db-wal

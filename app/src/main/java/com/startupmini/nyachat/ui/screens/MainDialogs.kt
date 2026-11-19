@@ -4,10 +4,13 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,10 +20,13 @@ import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Pin
 import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -32,14 +38,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -47,11 +58,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.remote.GitHubRelease
+import com.startupmini.nyachat.data.remote.GitHubUpdateChecker
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlinx.coroutines.delay
 
 // Dialog-dialog utama diekstrak dari MainActivity (TASK-1.3) — state di-hoist
 // via parameter + callback, tanpa perubahan behavior.
@@ -64,13 +75,38 @@ fun ApiKeyDialog(
     onDismiss: () -> Unit,
     onSave: (String) -> Unit
 ) {
-    var key by remember { mutableStateOf(initialKey) }
+    // F21: pertahankan draf kunci lintas rotasi.
+    var key by rememberSaveable { mutableStateOf(initialKey) }
+    var revealed by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+    val strInvalid = stringResource(R.string.ux_api_key_invalid)
 
-    // F3 (audit focus order): fokus langsung ke kolom API key saat dialog dibuka.
+    // Validasi minimal: kunci kosong/terlalu pendek hampir pasti salah tempel.
+    val isValid = key.trim().length >= 8
+    val showInvalid = key.isNotBlank() && !isValid
+    val visual: VisualTransformation =
+        if (revealed) VisualTransformation.None else PasswordVisualTransformation()
+
+    // F22: fokus tanpa delay sihir — LaunchedEffect langsung minta fokus.
     val keyFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        delay(120)
-        keyFocusRequester.requestFocus()
+    LaunchedEffect(Unit) { keyFocusRequester.requestFocus() }
+
+    // Jaga-jaga bila pemanggil tidak menutup dialog: lepas guard setelah jeda.
+    LaunchedEffect(isSaving) {
+        if (isSaving) {
+            kotlinx.coroutines.delay(1500)
+            isSaving = false
+        }
+    }
+
+    fun save() {
+        if (isSaving) return
+        val trimmed = key.trim()
+        if (trimmed.length < 8) return
+        isSaving = true
+        // Umpan balik "kunci tersimpan" dipancarkan pemanggil lewat
+        // AppSnackbar — tidak ada SnackbarHost lokal di file ini.
+        onSave(trimmed)
     }
 
     AlertDialog(
@@ -89,23 +125,51 @@ fun ApiKeyDialog(
                     onValueChange = { key = it },
                     label = { Text(stringResource(R.string.api_key_label)) },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    isError = showInvalid,
+                    visualTransformation = visual,
+                    trailingIcon = {
+                        IconButton(onClick = { revealed = !revealed }) {
+                            Icon(
+                                imageVector = if (revealed) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = stringResource(
+                                    if (revealed) R.string.ux_api_key_hide else R.string.ux_api_key_reveal
+                                )
+                            )
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { save() }),
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(keyFocusRequester)
                 )
+                if (showInvalid) {
+                    Text(
+                        text = strInvalid,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onSave(key.trim()) },
-                enabled = key.isNotBlank()
+                onClick = { save() },
+                enabled = isValid && !isSaving
             ) {
-                Text(stringResource(R.string.action_save))
+                if (isSaving) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text(stringResource(R.string.action_save))
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isSaving) {
                 Text(stringResource(R.string.action_cancel))
             }
         }
@@ -206,7 +270,10 @@ fun LogoutDialog(
                 Spacer(modifier = Modifier.height(8.dp))
                 TextButton(
                     onClick = onKeepData,
-                    modifier = Modifier.fillMaxWidth()
+                    // B28: TextButton default min-height 40dp → naik ke 48dp.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                 ) {
                     Text(
                         stringResource(R.string.logout_keep_data),
@@ -216,7 +283,10 @@ fun LogoutDialog(
                 }
                 TextButton(
                     onClick = onDeleteData,
-                    modifier = Modifier.fillMaxWidth()
+                    // B28: target sentuh minimal 48dp.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                 ) {
                     Text(
                         stringResource(R.string.logout_delete_data),
@@ -299,7 +369,12 @@ fun UpdateAvailableDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(28.dp),
+                            // B14: status spinner dibacakan TalkBack.
+                            modifier = Modifier
+                                .size(28.dp)
+                                .semantics {
+                                    stateDescription = stringResource(R.string.ux_status_checking)
+                                },
                             strokeWidth = 3.dp
                         )
                         Spacer(modifier = Modifier.width(14.dp))
@@ -371,12 +446,26 @@ fun UpdateAvailableDialog(
     )
 }
 
-/** Dialog info hasil cek update (sukses/gagal mengecek) — seragam dengan pola ikon+judul. */
+/** Dialog info hasil update — seragam dengan pola ikon+judul (C7/C8). */
 @Composable
 fun UpdateMessageDialog(
     message: String,
     onDismiss: () -> Unit
 ) {
+    val strDownloadFailed = stringResource(R.string.update_download_failed)
+    val strVerifyFailed = stringResource(R.string.ux_update_verify_failed)
+    // C7/C8: detail teknis (sidik jari sertifikat / host URL / tanda tangan APK)
+    // yang dilempar GitHubUpdateChecker TIDAK boleh tampil ke user — diganti
+    // pesan ux_update_verify_failed yang aman & bisa ditindaklanjuti.
+    val isTechnicalRejection = listOf(
+        "sidik jari", "sertifikat", "tanda tangan", "host github",
+        "url unduhan", "ditolak", "certificate", "signature"
+    ).any { message.contains(it, ignoreCase = true) }
+    val isError = isTechnicalRejection || message == strDownloadFailed
+    val title = stringResource(
+        if (isError) R.string.ux_update_error_title else R.string.ux_update_check_title
+    )
+    val body = if (isTechnicalRejection) strVerifyFailed else message
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -387,13 +476,8 @@ fun UpdateMessageDialog(
                 modifier = Modifier.size(22.dp)
             )
         },
-        title = {
-            Text(
-                stringResource(R.string.update_check_title),
-                fontWeight = FontWeight.Bold
-            )
-        },
-        text = { Text(message) },
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = { Text(body) },
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text(stringResource(R.string.action_ok))
@@ -408,6 +492,13 @@ internal fun timestampForFile(): String =
 
 /** Buka intent install untuk APK hasil unduhan (via FileProvider). */
 internal fun installApk(context: Context, file: File) {
+    // H4/M10 (audit 2026-11-19): guard pertahanan berlapis. Jalur install ini
+    // HANYA boleh dipakai setelah GitHubUpdateChecker.verifyApkSignature() true.
+    // Caller utama (MainOverlays) sudah memverifikasi; check di sini mencegah
+    // caller baru memasang APK tak terverifikasi.
+    check(GitHubUpdateChecker.verifyApkSignature(context, file)) {
+        "APK gagal verifikasi tanda tangan — install dibatalkan"
+    }
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, "application/vnd.android.package-archive")

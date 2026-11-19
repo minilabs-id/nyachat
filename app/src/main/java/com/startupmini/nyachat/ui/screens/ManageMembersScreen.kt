@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -45,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +58,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,7 +67,7 @@ import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.remote.FamilyMember
 import com.startupmini.nyachat.data.remote.MembershipManager
 import com.startupmini.nyachat.data.remote.JoinRequest
-import kotlinx.coroutines.delay
+import com.startupmini.nyachat.ui.AppSnackbar
 import kotlinx.coroutines.launch
 
 /**
@@ -103,6 +107,28 @@ fun ManageMembersScreen(
     // WAJIB konfirmasi dulu — menghapus anggota = akses hilang permanen,
     // jadikan pemilik = transfer kendali. Sebelumnya dieksekusi langsung.
     var pendingAction by remember { mutableStateOf<MemberAction?>(null) }
+    // R2-H5: SATU kanal umpan balik (AppSnackbar) — SnackbarHost lokal & Toast
+    // dihapus. guard in-flight supaya dialog/konfirmasi hanya ditutup SETELAH
+    // operasi selesai (B5/B6).
+    var pendingReject by remember { mutableStateOf<JoinRequest?>(null) }
+    var joinBusy by remember { mutableStateOf(false) }
+    var actionInFlight by remember { mutableStateOf(false) }
+    // B11: simpan FocusRequester pemicu & kembalikan fokus saat dialog ditutup.
+    val renameFocusRequester = remember { FocusRequester() }
+    var focusRestoreTrigger by remember { mutableStateOf<FocusRequester?>(null) }
+    fun restoreTriggerFocus() {
+        focusRestoreTrigger?.requestFocus()
+        focusRestoreTrigger = null
+    }
+    val strApproveSuccess = stringResource(R.string.ux_approve_success)
+    val strApproveFailed = stringResource(R.string.ux_approve_failed)
+    val strRejectSuccess = stringResource(R.string.ux_reject_success)
+    val strMemberRemoved = stringResource(R.string.ux_member_removed)
+    val strRoleUpdated = stringResource(R.string.ux_member_role_updated)
+    val strActionFailed = stringResource(R.string.ux_member_action_failed)
+    val strWorkspaceRenamed = stringResource(R.string.ux_workspace_renamed)
+    val strLabelUpdated = stringResource(R.string.ux_label_updated)
+    val strUpgradeContact = stringResource(R.string.ux_upgrade_contact)
 
     // Satu motion language dengan SettingsSheet & sheet lain (audit motion
     // 2026-08-12): skipPartiallyExpanded = true → langsung buka penuh dari
@@ -121,11 +147,43 @@ fun ManageMembersScreen(
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         containerColor = MaterialTheme.colorScheme.surface,
+        // B-M20: handle bawaan dimatikan — custom 36x4dp handle dipakai di konten
+        // supaya tidak ada dua handle bertumpuk.
+        dragHandle = null,
         // Sheet hidup di area konten (berhenti di atas NavigationBar) — padding
         // navbar bawaan sheet dinolkan supaya tidak muncul celah.
         contentWindowInsets = { WindowInsets(0) },
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+      // B-H2: pada tablet/landscape konten sheet dipusatkan (TopCenter), lalu
+      // dibatasi 600dp — sebelumnya Box 600dp menempel di tepi kiri.
+      Box(
+          modifier = Modifier.fillMaxWidth(),
+          contentAlignment = Alignment.TopCenter
+      ) {
+       Box(modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp)) {
+        // B-M18/M20/M21: satu Column konten dengan navigation-bar inset, drag
+        // handle 36x4dp, dan tinggi maksimal 640dp (seragam dengan sheet lain).
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .heightIn(max = 640.dp)
+        ) {
+            // B-M20: drag handle — samakan dengan AddTransactionDialog & AiReportDialog.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+                )
+            }
             // Header diseragamkan penuh dengan SettingsSheet & ProfileAccountSheet
             // (audit 2026-08-12): padding 20/8 + ikon 20dp + titleMedium, TANPA
             // tombol X & garis bawah — dua sheet lain tidak memilikinya, sheet
@@ -168,7 +226,13 @@ fun ManageMembersScreen(
                 }
                 // r1.6.0: owner bisa mengganti nama workspace (dialog di bawah).
                 if (isOwner) {
-                    IconButton(onClick = { nameDialogOpen = true }) {
+                    IconButton(
+                        onClick = {
+                            focusRestoreTrigger = renameFocusRequester
+                            nameDialogOpen = true
+                        },
+                        modifier = Modifier.focusRequester(renameFocusRequester)
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.Edit,
                             contentDescription = stringResource(R.string.manage_members_edit_name),
@@ -180,11 +244,11 @@ fun ManageMembersScreen(
             }
 
             LazyColumn(
-                // Batasi tinggi supaya sheet tidak penuh layar — daftar panjang
-                // tetap scroll di dalam sheet (konsisten dengan SettingsSheet).
+                // B-M21: satu batas tinggi sheet dengan sheet lain (640dp) —
+                // daftar panjang tetap scroll di dalam sheet.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 560.dp),
+                    .heightIn(max = 640.dp),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -211,22 +275,35 @@ fun ManageMembersScreen(
                     items(joinRequests, key = { "join_${it.uid}" }) { request ->
                         JoinRequestCard(
                             request = request,
+                            busy = joinBusy,
                             onApprove = {
+                                if (joinBusy) return@JoinRequestCard
+                                joinBusy = true
                                 scope.launch {
                                     val result = MembershipManager.approveJoin(pin, request)
-                                    // r1.6.0: workspace penuh (free=2) → arahkan ke
-                                    // dialog upgrade, bukan diam-diam gagal. Plan
-                                    // sudah pro & penuh → tak ada upgrade yang bisa
-                                    // ditawarkan (hindari dialog buntu).
-                                    if (result == MembershipManager.ApproveResult.WORKSPACE_FULL &&
-                                        familyPlan != Constants.Plans.PRO
-                                    ) {
-                                        upgradeDialogOpen = true
+                                    // F9: umpan balik eksplisit untuk tiap hasil.
+                                    when (result) {
+                                        MembershipManager.ApproveResult.SUCCESS ->
+                                            AppSnackbar.show(strApproveSuccess)
+                                        MembershipManager.ApproveResult.WORKSPACE_FULL ->
+                                            // r1.6.0: workspace penuh (free=2) → arahkan
+                                            // ke upgrade bila masih bisa; plan pro penuh
+                                            // → tidak ada tawaran, beri tahu user.
+                                            if (familyPlan != Constants.Plans.PRO) {
+                                                upgradeDialogOpen = true
+                                            } else {
+                                                AppSnackbar.show(strApproveFailed)
+                                            }
+                                        MembershipManager.ApproveResult.FAILED ->
+                                            AppSnackbar.show(strApproveFailed)
                                     }
+                                    joinBusy = false
                                 }
                             },
                             onReject = {
-                                scope.launch { MembershipManager.rejectJoin(pin, request.uid) }
+                                // F9: konfirmasi dulu sebelum menolak (permintaan
+                                // harus dikirim ulang setelah ditolak).
+                                if (!joinBusy) pendingReject = request
                             }
                         )
                     }
@@ -239,11 +316,44 @@ fun ManageMembersScreen(
                 // belum ada (sebelumnya hanya non-owner).
                 if (members.isEmpty()) {
                     item {
-                        Text(
-                            text = stringResource(R.string.manage_members_empty),
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        // B-M22: empty state ditingkatkan dari teks 13sp polos
+                        // menjadi Card + ikon 48dp + judul + hint (pola RekapList),
+                        // memakai string yang sudah ada — tanpa string baru.
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(36.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Group,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                    modifier = Modifier.size(48.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = stringResource(R.string.manage_members_list),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = stringResource(R.string.manage_members_empty),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
                     }
                 } else {
                     items(members, key = { "member_${it.uid}" }) { member ->
@@ -252,14 +362,21 @@ fun ManageMembersScreen(
                             isSelf = member.uid == myUid,
                             isOwner = isOwner,
                             avatarPath = memberAvatars[member.uid],
-                            onEditLabel = { labelTarget = member },
-                            onToggleRole = {
+                            // B11: teruskan FocusRequester tombol pemicu supaya
+                            // fokus dikembalikan saat dialog ditutup.
+                            onEditLabel = { trigger ->
+                                focusRestoreTrigger = trigger
+                                labelTarget = member
+                            },
+                            onToggleRole = { trigger ->
                                 // Konfirmasi dulu — promote/demote mengubah
                                 // kendali workspace.
+                                focusRestoreTrigger = trigger
                                 pendingAction = MemberAction.ToggleRole(member)
                             },
-                            onRemove = {
+                            onRemove = { trigger ->
                                 // Konfirmasi dulu — menghapus = akses hilang.
+                                focusRestoreTrigger = trigger
                                 pendingAction = MemberAction.Remove(member)
                             }
                         )
@@ -267,17 +384,30 @@ fun ManageMembersScreen(
                 }
             }
         }
+       }
+      }
     }
 
     labelTarget?.let { target ->
         LabelEditDialog(
             member = target,
-            onDismiss = { labelTarget = null },
-            onSave = { newLabel ->
-                scope.launch {
-                    MembershipManager.setMemberRole(pin, target.uid, target.role, newLabel)
-                }
+            busy = actionInFlight,
+            onDismiss = {
                 labelTarget = null
+                restoreTriggerFocus()
+            },
+            onSave = { newLabel ->
+                if (actionInFlight) return@LabelEditDialog
+                actionInFlight = true
+                scope.launch {
+                    // R2-H3: pakai HASIL nyata — jangan runCatching{}.isSuccess
+                    // pada blok yang tidak pernah melempar.
+                    val ok = MembershipManager.setMemberRole(pin, target.uid, target.role, newLabel)
+                    AppSnackbar.show(if (ok) strLabelUpdated else strActionFailed)
+                    actionInFlight = false
+                    labelTarget = null // B5: tutup HANYA setelah hasil diketahui
+                    restoreTriggerFocus()
+                }
             }
         )
     }
@@ -314,27 +444,45 @@ fun ManageMembersScreen(
             }
         }
         AlertDialog(
-            onDismissRequest = { pendingAction = null },
+            // F11: saat operasi berjalan, Back/tap-di-luar tidak boleh menutup
+            // dialog sebelum hasilnya diketahui.
+            onDismissRequest = {
+                if (!actionInFlight) {
+                    pendingAction = null
+                    restoreTriggerFocus()
+                }
+            },
             title = { Text(stringResource(titleRes)) },
             text = { Text(stringResource(msgRes, memberDisplayName)) },
             confirmButton = {
                 TextButton(
+                    enabled = !actionInFlight,
                     onClick = {
-                        when (action) {
-                            is MemberAction.Remove -> {
-                                scope.launch { MembershipManager.removeMember(pin, member.uid) }
-                            }
-                            is MemberAction.ToggleRole -> {
-                                scope.launch {
+                        if (actionInFlight) return@TextButton
+                        actionInFlight = true
+                        scope.launch {
+                            // R2-H3: method kini mengembalikan Boolean hasil operasi.
+                            val ok = when (action) {
+                                is MemberAction.Remove ->
+                                    MembershipManager.removeMember(pin, member.uid)
+                                is MemberAction.ToggleRole ->
                                     MembershipManager.setMemberRole(
                                         pin, member.uid,
                                         if (member.isOwner) MembershipManager.ROLE_MEMBER
                                         else MembershipManager.ROLE_OWNER
                                     )
-                                }
                             }
+                            AppSnackbar.show(
+                                when {
+                                    !ok -> strActionFailed
+                                    action is MemberAction.Remove -> strMemberRemoved
+                                    else -> strRoleUpdated
+                                }
+                            )
+                            actionInFlight = false
+                            pendingAction = null
+                            restoreTriggerFocus()
                         }
-                        pendingAction = null
                     }
                 ) {
                     Text(
@@ -348,50 +496,140 @@ fun ManageMembersScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingAction = null }) {
+                TextButton(
+                    onClick = {
+                        pendingAction = null
+                        restoreTriggerFocus()
+                    },
+                    enabled = !actionInFlight
+                ) {
                     Text(stringResource(R.string.action_cancel))
                 }
             }
         )
     }
 
-    // r1.6.0: rename nama workspace (owner) — nama kosong diblokir tombol Simpan.
-    if (nameDialogOpen) {
-        WorkspaceNameDialog(
-            currentName = familyName.ifBlank { stringResource(R.string.topbar_title) },
-            onDismiss = { nameDialogOpen = false },
-            onSave = { newName ->
-                scope.launch { MembershipManager.setFamilyName(pin, newName) }
-                nameDialogOpen = false
+    // F9: konfirmasi tolak permintaan bergabung + umpan balik hasilnya.
+    pendingReject?.let { req ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!joinBusy) {
+                    pendingReject = null
+                    restoreTriggerFocus()
+                }
+            },
+            title = { Text(stringResource(R.string.ux_reject_confirm_title)) },
+            text = { Text(stringResource(R.string.ux_reject_confirm_body)) },
+            confirmButton = {
+                TextButton(
+                    enabled = !joinBusy,
+                    onClick = {
+                        if (joinBusy) return@TextButton
+                        joinBusy = true
+                        scope.launch {
+                            val ok = MembershipManager.rejectJoin(pin, req.uid)
+                            AppSnackbar.show(if (ok) strRejectSuccess else strActionFailed)
+                            joinBusy = false
+                            pendingReject = null
+                            restoreTriggerFocus()
+                        }
+                    }
+                ) { Text(stringResource(R.string.manage_members_reject)) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingReject = null
+                        restoreTriggerFocus()
+                    },
+                    enabled = !joinBusy
+                ) { Text(stringResource(R.string.action_cancel)) }
             }
         )
     }
 
-    // r1.6.0: upgrade ke Pro — PLACEHOLDER beta (billing Play menyusul).
-    // Muncul dari tombol baris paket ATAU saat approve ditolak karena penuh.
+    // r1.6.0: rename nama workspace (owner) — nama kosong diblokir tombol Simpan.
+    // B5: actionInFlight + AppSnackbar, dialog ditutup hanya setelah hasil nyata.
+    if (nameDialogOpen) {
+        WorkspaceNameDialog(
+            currentName = familyName.ifBlank { stringResource(R.string.topbar_title) },
+            busy = actionInFlight,
+            onDismiss = {
+                nameDialogOpen = false
+                restoreTriggerFocus()
+            },
+            onSave = { newName ->
+                if (actionInFlight) return@WorkspaceNameDialog
+                actionInFlight = true
+                scope.launch {
+                    val ok = MembershipManager.setFamilyName(pin, newName)
+                    AppSnackbar.show(if (ok) strWorkspaceRenamed else strActionFailed)
+                    actionInFlight = false
+                    nameDialogOpen = false
+                    restoreTriggerFocus()
+                }
+            }
+        )
+    }
+
+    // R2-H2: TIDAK ada alur pembelian di aplikasi. Upgrade hanya bisa terjadi
+    // bila entitlement Pro sudah aktif di server — dialog ini menjelaskan itu
+    // dan menawarkan pemeriksaan ulang (bukan transaksi palsu).
     if (upgradeDialogOpen) {
+        val strUpgradeSuccess = stringResource(R.string.plan_pro_label) + " aktif"
         AlertDialog(
-            onDismissRequest = { upgradeDialogOpen = false },
+            onDismissRequest = {
+                if (!actionInFlight) {
+                    upgradeDialogOpen = false
+                    restoreTriggerFocus()
+                }
+            },
             title = { Text(stringResource(R.string.plan_upgrade_title)) },
             text = {
-                Text(
-                    stringResource(
-                        R.string.plan_upgrade_body,
-                        Constants.Limits.FREE_MAX_MEMBERS,
-                        Constants.Limits.PRO_MAX_MEMBERS
+                Column {
+                    Text(
+                        stringResource(
+                            R.string.plan_upgrade_body,
+                            Constants.Limits.FREE_MAX_MEMBERS,
+                            Constants.Limits.PRO_MAX_MEMBERS
+                        )
                     )
-                )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = strUpgradeContact,
+                        // B-L: fontSize literal 12.sp → token tipografi (D-L5).
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
+                    enabled = !actionInFlight,
                     onClick = {
-                        upgradeDialogOpen = false
-                        scope.launch { MembershipManager.setPlan(pin, Constants.Plans.PRO) }
+                        if (actionInFlight) return@TextButton
+                        actionInFlight = true
+                        scope.launch {
+                            // setPlan server-authoritative: true hanya bila
+                            // entitlement Pro terverifikasi. Tanpa entitlement →
+                            // pesan ux_upgrade_contact (bukan purchase flow).
+                            val ok = MembershipManager.setPlan(pin, Constants.Plans.PRO)
+                            AppSnackbar.show(if (ok) strUpgradeSuccess else strUpgradeContact)
+                            actionInFlight = false
+                            upgradeDialogOpen = false
+                            restoreTriggerFocus()
+                        }
                     }
                 ) { Text(stringResource(R.string.plan_upgrade_now)) }
             },
             dismissButton = {
-                TextButton(onClick = { upgradeDialogOpen = false }) {
+                TextButton(
+                    enabled = !actionInFlight,
+                    onClick = {
+                        upgradeDialogOpen = false
+                        restoreTriggerFocus()
+                    }
+                ) {
                     Text(stringResource(R.string.plan_upgrade_later))
                 }
             }
@@ -409,7 +647,8 @@ private sealed interface MemberAction {
 private fun SectionTitle(text: String) {
     Text(
         text = text,
-        fontSize = 13.sp,
+        // B-L: fontSize literal 13.sp → token tipografi (min 12sp, D-L5).
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(top = 2.dp)
@@ -420,7 +659,9 @@ private fun SectionTitle(text: String) {
 private fun JoinRequestCard(
     request: JoinRequest,
     onApprove: () -> Unit,
-    onReject: () -> Unit
+    onReject: () -> Unit,
+    // F9: kedua tombol dinonaktifkan saat aksi masih berjalan.
+    busy: Boolean = false
 ) {
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -440,27 +681,35 @@ private fun JoinRequestCard(
                     text = request.name.ifBlank { request.email },
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    // C11: nama pemohon panjang tidak boleh menimpa tombol aksi.
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 if (request.name.isNotBlank() && request.email.isNotBlank()) {
                     Text(
                         text = request.email,
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        // B-M12: email panjang dipangkas, tidak melewati kartu.
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
-            TextButton(onClick = onApprove) {
+            TextButton(onClick = onApprove, enabled = !busy) {
                 Icon(
                     imageVector = Icons.Rounded.Check,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.width(18.dp)
+                    // F13: width(18.dp) meregangkan ikon — pakai size().
+                    modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(stringResource(R.string.manage_members_approve), fontSize = 12.sp)
             }
-            TextButton(onClick = onReject) {
+            TextButton(onClick = onReject, enabled = !busy) {
                 Text(
                     stringResource(R.string.manage_members_reject),
                     fontSize = 12.sp,
@@ -476,9 +725,10 @@ private fun MemberCard(
     member: FamilyMember,
     isSelf: Boolean,
     isOwner: Boolean,
-    onEditLabel: () -> Unit,
-    onToggleRole: () -> Unit,
-    onRemove: () -> Unit,
+    // B11: callback membawa FocusRequester pemicu untuk restorasi fokus.
+    onEditLabel: (FocusRequester) -> Unit,
+    onToggleRole: (FocusRequester) -> Unit,
+    onRemove: (FocusRequester) -> Unit,
     // r1.2.3 (P1): path foto avatar anggota (null → inisial berwarna).
     avatarPath: String? = null
 ) {
@@ -511,7 +761,12 @@ private fun MemberCard(
                         text = member.label.ifBlank { member.name.ifBlank { stringResource(R.string.sender_anggota) } },
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        // B-M12: nama/label panjang dipangkas supaya tidak
+                        // mendorong badge "Anda" keluar dari kartu.
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     if (isSelf) {
                         Spacer(modifier = Modifier.width(6.dp))
@@ -528,7 +783,8 @@ private fun MemberCard(
                             imageVector = Icons.Rounded.Star,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.width(13.dp)
+                            // C5: width() meregangkan ikon — pakai size().
+                            modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(3.dp))
                         Text(
@@ -547,7 +803,12 @@ private fun MemberCard(
                         Text(
                             text = " • ${member.name}",
                             fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // B-M12: sisa ruang dipangkas, nama tidak menimpa
+                            // tombol overflow di ujung kartu.
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                     }
                 }
@@ -559,11 +820,22 @@ private fun MemberCard(
             // Hapus (guard: owner tidak bisa dihapus langsung).
             if (isOwner && !isSelf) {
                 var menuOpen by remember { mutableStateOf(false) }
+                // B11: fokus tombol pemicu disimpan untuk dikembalikan setelah
+                // dialog label/konfirmasi ditutup.
+                val actionsFocusRequester = remember { FocusRequester() }
                 Box(modifier = Modifier) {
-                    IconButton(onClick = { menuOpen = true }) {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.focusRequester(actionsFocusRequester)
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.MoreVert,
-                            contentDescription = stringResource(R.string.manage_members_actions),
+                            // F12: sebut nama anggota supaya TalkBack tidak hanya
+                            // membaca "Aksi" generik.
+                            contentDescription = stringResource(
+                                R.string.ux_member_actions_for,
+                                member.label.ifBlank { member.name }
+                            ),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(20.dp)
                         )
@@ -578,7 +850,7 @@ private fun MemberCard(
                             },
                             onClick = {
                                 menuOpen = false
-                                onEditLabel()
+                                onEditLabel(actionsFocusRequester)
                             }
                         )
                         DropdownMenuItem(
@@ -594,7 +866,7 @@ private fun MemberCard(
                             },
                             onClick = {
                                 menuOpen = false
-                                onToggleRole()
+                                onToggleRole(actionsFocusRequester)
                             }
                         )
                         // Audit workspace: owner TIDAK bisa langsung dihapus — harus
@@ -612,7 +884,7 @@ private fun MemberCard(
                                 },
                                 onClick = {
                                     menuOpen = false
-                                    onRemove()
+                                    onRemove(actionsFocusRequester)
                                 }
                             )
                         }
@@ -714,19 +986,19 @@ private fun PlanCard(
 private fun WorkspaceNameDialog(
     currentName: String,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit
+    onSave: (String) -> Unit,
+    // B5/B6: tombol dinonaktifkan saat operasi berjalan (anti double-submit).
+    busy: Boolean = false
 ) {
-    var text by remember { mutableStateOf(currentName) }
+    // F21: draf nama dipertahankan lintas rotasi.
+    var text by rememberSaveable { mutableStateOf(currentName) }
 
-    // F3 (audit focus order): fokus langsung ke kolom nama saat dialog dibuka.
+    // F3/F22 (audit focus order): fokus tanpa magic delay.
     val nameFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        delay(120)
-        nameFocusRequester.requestFocus()
-    }
+    LaunchedEffect(Unit) { nameFocusRequester.requestFocus() }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(stringResource(R.string.workspace_name_dialog_title)) },
         text = {
             OutlinedTextField(
@@ -740,12 +1012,15 @@ private fun WorkspaceNameDialog(
             )
         },
         confirmButton = {
-            Button(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank()) {
+            Button(
+                onClick = { if (!busy) onSave(text.trim()) },
+                enabled = text.isNotBlank() && !busy
+            ) {
                 Text(stringResource(R.string.workspace_name_dialog_save))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !busy) {
                 Text(stringResource(R.string.action_cancel))
             }
         }
@@ -756,19 +1031,19 @@ private fun WorkspaceNameDialog(
 private fun LabelEditDialog(
     member: FamilyMember,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit
+    onSave: (String) -> Unit,
+    // B5/B6: tombol dinonaktifkan saat operasi berjalan (anti double-submit).
+    busy: Boolean = false
 ) {
-    var text by remember { mutableStateOf(member.label) }
+    // F21: draf label dipertahankan lintas rotasi.
+    var text by rememberSaveable { mutableStateOf(member.label) }
 
-    // F3 (audit focus order): fokus langsung ke kolom label saat dialog dibuka.
+    // F3/F22 (audit focus order): fokus tanpa magic delay.
     val labelFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        delay(120)
-        labelFocusRequester.requestFocus()
-    }
+    LaunchedEffect(Unit) { labelFocusRequester.requestFocus() }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(stringResource(R.string.manage_members_label_title)) },
         text = {
             OutlinedTextField(
@@ -782,12 +1057,15 @@ private fun LabelEditDialog(
             )
         },
         confirmButton = {
-            Button(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank()) {
+            Button(
+                onClick = { if (!busy) onSave(text.trim()) },
+                enabled = text.isNotBlank() && !busy
+            ) {
                 Text(stringResource(R.string.manage_members_label_save))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !busy) {
                 Text(stringResource(R.string.action_cancel))
             }
         }

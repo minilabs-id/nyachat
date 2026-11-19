@@ -18,6 +18,14 @@ plugins {
 private val appVersion: String = project.findProperty("appVersion") as String? ?: "r1.5.2"
 private val appVersionCode: Int = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 32
 
+// H4/M10 (audit 2026-11-19): sidik jari SHA-256 sertifikat debug.keystore yang
+// DI-COMMIT (alias androiddebugkey, password android). Dihitung dari sertifikat
+// di debug.keystore root repo; dipakai sebagai fallback HANYA untuk build debug
+// supaya update in-app di debug tetap bisa diuji tanpa -PapkCertSha256.
+// Untuk REGENERASI: keytool -list -v -keystore debug.keystore -storetype PKCS12
+// -storepass android → salin nilai SHA256. JANGAN pakai nilai ini di release.
+private val debugApkCertSha256 = "0F:04:34:9D:55:BF:1B:79:36:64:41:51:6C:6A:C4:EA:86:F7:28:0A:42:21:2F:0B:CC:EE:37:33:4A:95:18:BA"
+
 android {
   namespace = "com.startupmini.nyachat"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -30,6 +38,19 @@ android {
     versionName = appVersion
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // H4/M10 (audit 2026-11-19): sidik jari SHA-256 sertifikat penandatangan APK
+    // yang DIIZINKAN untuk update in-app. GitHubUpdateChecker.verifyApkSignature()
+    // membandingkan sertifikat APK unduhan dengan nilai ini SEBELUM install.
+    // Kosong/blank = FAIL-CLOSED (semua update ditolak). Set lewat
+    // -PapkCertSha256=<SHA-256 sertifikat RELEASE> pada build release/CI.
+    // (Build debug meng-override dengan sertifikat debug — lihat buildTypes.debug.)
+    buildConfigField(
+      "String",
+      "APK_CERT_SHA256",
+      "\"${project.findProperty("apkCertSha256") ?: ""}\""
+    )
+
     // CATATAN KEAMANAN: TIDAK ada API key AI yang dikompilasi ke APK (key bisa
     // diekstrak). Gemini & OpenRouter murni BYOK via Pengaturan → Kunci API.
     // Dulu ada buildConfigField OPENROUTER_API_KEY yang membakar key produksi ke
@@ -44,6 +65,11 @@ android {
       keyAlias = "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
+    // L12 (audit 2026-11-19): debug.keystore ini HANYA untuk build DEBUG dan
+    // TIDAK BOLEH dipakai untuk release signing. Build release memakai
+    // signingConfig "release" di bawah yang membaca KEYSTORE_PATH/STORE_PASSWORD/
+    // KEY_PASSWORD dari environment. Jangan pernah mengganti storeFile release
+    // dengan debug.keystore (password standar `android` — siapa pun bisa pakai).
     // debug.keystore DI-COMMIT ke repo (PKCS12, password android, alias
     // androiddebugkey) supaya SHA-1 penandatangan DEBUG STABEL di semua build
     // (lokal maupun GitHub Actions). Sebelumnya CI membuat keystore acak baru
@@ -65,8 +91,19 @@ android {
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
+      // H4/M10: WAJIB -PapkCertSha256=<sidik jari sertifikat release>. Tanpa itu
+      // APK_CERT_SHA256 kosong dan update in-app fail-closed (ditolak semua).
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      signingConfig = signingConfigs.getByName("debugConfig")
+      // H4/M10: debug memakai sertifikat debug.keystore yang di-commit. Nilai
+      // -PapkCertSha256 tetap menang bila diberikan (mis. uji fingerprint release).
+      buildConfigField(
+        "String",
+        "APK_CERT_SHA256",
+        "\"${project.findProperty("apkCertSha256")?.toString()?.takeIf { it.isNotBlank() } ?: debugApkCertSha256}\""
+      )
+    }
   }
 
   // Resource Firebase (default_web_client_id dkk.) dipertahankan di APK release

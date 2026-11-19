@@ -8,6 +8,11 @@ package com.startupmini.nyachat.ui.screens
  *
  * Logika murni (tanpa state) — mudah di-unit-test, dipisah dari Composable
  * seperti [MembershipGateLogic].
+ *
+ * Catatan (M5): sejak callable `registerPinAttempt` aktif, COUNTER SERVER yang
+ * otoritatif. Limiter ini murni UX (umps balik instan & mengurangi query) —
+ * jangan dijadikan satu-satunya pembatas brute-force. Method sengaja dipertahankan
+ * karena dipakai tes & UI.
  */
 object PinAttemptLimiter {
     /** Maksimum percobaan yang dihitung dalam satu jendela waktu. */

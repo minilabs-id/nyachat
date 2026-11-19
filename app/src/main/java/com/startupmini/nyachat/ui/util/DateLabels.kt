@@ -29,16 +29,22 @@ internal fun dayLabel(timestamp: Long, todayLabel: String, yesterdayLabel: Strin
         timeInMillis = timestamp
         set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
     }
+    // M10: mundur satu HARI KALENDER (bukan 86_400_000 ms) — aman saat DST /
+    // perubahan zona waktu sehingga "Kemarin" tetap tepat.
+    val yesterday = Calendar.getInstance().apply {
+        add(Calendar.DAY_OF_YEAR, -1)
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }
     return when (msgDay.timeInMillis) {
         today.timeInMillis -> todayLabel
-        today.timeInMillis - 86_400_000L -> yesterdayLabel
+        yesterday.timeInMillis -> yesterdayLabel
         else -> SimpleDateFormat("EEEE, dd MMM yyyy", Locale.forLanguageTag("id-ID")).format(Date(timestamp))
     }
 }
 
 /** Jam menit "HH:mm" — label detail sinkronisasi "Tersinkron · 14:32" (3.8). */
 internal fun formatClockTime(millis: Long): String =
-    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
+    SimpleDateFormat("HH:mm", Locale("id", "ID")).format(Date(millis))
 
 /** Baris riwayat rekap: header hari atau item transaksi. */
 internal sealed interface TransactionRow {

@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,13 +56,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.startupmini.nyachat.Constants
 import com.startupmini.nyachat.R
 import com.startupmini.nyachat.data.remote.SyncStatus
@@ -69,6 +74,8 @@ import com.startupmini.nyachat.ui.theme.LocalSemanticColors
 import com.startupmini.nyachat.ui.theme.Motion
 import com.startupmini.nyachat.ui.util.formatClockTime
 import com.startupmini.nyachat.ui.util.idrCurrencyFormat
+import java.text.NumberFormat
+import kotlin.math.min
 
 // Kartu & grafik analitik layar Rekap — diekstrak dari RekapScreen.kt (TASK-1.2.1)
 // tanpa perubahan behavior. Warna kategori dipilih sesuai tema.
@@ -80,11 +87,14 @@ fun BalanceBannerCard(
     balance: Double,
     syncStatus: SyncStatus = SyncStatus.SYNCED,
     // 3.8: waktu terakhir sinkron — ditampilkan "Tersinkron · HH:mm" saat SYNCED.
-    lastSyncedAtMillis: Long? = null
+    lastSyncedAtMillis: Long? = null,
+    // L5: satu formatter dipakai ulang dari RekapScreen.
+    currencyFormat: NumberFormat = remember { idrCurrencyFormat() }
 ) {
     val semantic = LocalSemanticColors.current
-    // Formatter Rupiah dari SATU sumber kebenaran (audit screens/ 2026-08-14).
-    val currencyFormat = remember { idrCurrencyFormat() }
+    // B-M8: displaySmall (36sp) terpotong di layar 320dp — turunkan satu step
+    // pada layar sempit supaya nominal tetap terbaca utuh tanpa clip.
+    val isNarrowScreen = LocalConfiguration.current.screenWidthDp < 360
     // Warna balance dihitung per-state di dalam AnimatedContent (audit motion:
     // angka lama pudar dengan warnanya sendiri saat saldo berpindah tanda).
 
@@ -158,7 +168,8 @@ fun BalanceBannerCard(
                 }
                 Text(
                     text = currencyFormat.format(bal),
-                    style = MaterialTheme.typography.displaySmall,
+                    style = if (isNarrowScreen) MaterialTheme.typography.headlineSmall
+                            else MaterialTheme.typography.displaySmall,
                     fontWeight = FontWeight.Bold,
                     color = balColor,
                     maxLines = 1,
@@ -174,9 +185,11 @@ fun BalanceBannerCard(
                 // Income Summary
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // L3: arah mengikuti semantik tren — pemasukan naik (↑),
+                        // pengeluaran turun (↓) — + deskripsi untuk TalkBack.
                         Icon(
-                            imageVector = Icons.Rounded.ArrowDownward,
-                            contentDescription = null,
+                            imageVector = Icons.Rounded.ArrowUpward,
+                            contentDescription = stringResource(R.string.income_label),
                             tint = semantic.income,
                             modifier = Modifier.size(16.dp)
                         )
@@ -200,9 +213,12 @@ fun BalanceBannerCard(
                     ) { income ->
                         Text(
                             text = currencyFormat.format(income),
-                            style = MaterialTheme.typography.titleMedium,
+                            // B-M8: satu step lebih kecil di layar 320dp.
+                            style = if (isNarrowScreen) MaterialTheme.typography.titleSmall
+                                    else MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            // L4: warna semantik (hijau) — bukan onSurface netral.
+                            color = semantic.income,
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                         )
@@ -215,8 +231,8 @@ fun BalanceBannerCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Rounded.ArrowUpward,
-                            contentDescription = null,
+                            imageVector = Icons.Rounded.ArrowDownward,
+                            contentDescription = stringResource(R.string.expense_label),
                             tint = semantic.expense,
                             modifier = Modifier.size(16.dp)
                         )
@@ -240,9 +256,12 @@ fun BalanceBannerCard(
                     ) { expense ->
                         Text(
                             text = currencyFormat.format(expense),
-                            style = MaterialTheme.typography.titleMedium,
+                            // B-M8: satu step lebih kecil di layar 320dp.
+                            style = if (isNarrowScreen) MaterialTheme.typography.titleSmall
+                                    else MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            // L4: warna semantik (merah) — bukan onSurface netral.
+                            color = semantic.expense,
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                         )
@@ -269,27 +288,66 @@ private fun SyncIndicator(syncStatus: SyncStatus, lastSyncedAtMillis: Long? = nu
             }
         )
     }
+    // B27: status OFFLINE dan ERROR kini dibedakan secara visual: OFFLINE =
+    // dot berongga (informatif — data lokal aman), ERROR = badge "!" warning.
+    val statusDescription = stringResource(
+        when (syncStatus) {
+            SyncStatus.SYNCED -> R.string.sync_status_synced
+            SyncStatus.SYNCING -> R.string.sync_status_syncing
+            SyncStatus.OFFLINE -> R.string.sync_status_offline
+            SyncStatus.ERROR -> R.string.sync_status_error
+        }
+    )
     // Dot mode-aware (audit WCAG): light pakai warna gelap (>=4.7:1 di atas putih),
     // dark pakai warna cerah (>=3:1 di atas surface gelap).
     val semantic = LocalSemanticColors.current
+    // R2-C6: pakai token semantik mode-aware, bukan branch isDark manual.
     val dotColor = when (syncStatus) {
-        SyncStatus.SYNCED -> if (semantic.isDark) Color(0xFF34A853) else Color(0xFF188038)
-        SyncStatus.SYNCING -> if (semantic.isDark) Color(0xFFFBBC04) else Color(0xFF8D6E00)
-        // OFFLINE & ERROR keduanya netral (BUG-06): "Mode offline"/"Belum sinkron"
-        // adalah status informatif — merah hanya menimbulkan alarm palsu padahal
-        // data lokal tetap aman dan akan tersinkron saat koneksi pulih.
-        SyncStatus.OFFLINE, SyncStatus.ERROR -> if (semantic.isDark) Color(0xFF9AA0A6) else Color(0xFF5F6368)
+        SyncStatus.SYNCED -> semantic.syncOk
+        SyncStatus.SYNCING -> semantic.syncPending
+        SyncStatus.OFFLINE -> semantic.receiptPending
+        SyncStatus.ERROR -> semantic.syncError
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.semantics { contentDescription = label }
+        // B24: clearAndSetSemantics — label dibacakan SATU kali, teks + marker
+        // di dalam tidak menghasilkan announcement ganda di TalkBack.
+        modifier = Modifier.clearAndSetSemantics { contentDescription = label }
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(dotColor)
-        )
+        // B-L: semua status pakai ukuran 10dp agar Row tidak berubah tinggi
+        // saat status berganti (sebelumnya 8/10/14dp → header banner berkedut).
+        when (syncStatus) {
+            SyncStatus.OFFLINE -> Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .border(1.5.dp, dotColor, CircleShape)
+                    .semantics { contentDescription = statusDescription }
+            )
+            SyncStatus.ERROR -> Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.14f))
+                    .semantics { contentDescription = statusDescription },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "!",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                    fontWeight = FontWeight.Bold,
+                    color = dotColor,
+                    maxLines = 1
+                )
+            }
+            else -> Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(dotColor)
+                    .semantics { contentDescription = statusDescription }
+            )
+        }
         Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = label,
@@ -308,11 +366,10 @@ fun CategoryProgressRow(
     accentColor: Color,
     trendDelta: Double? = null,
     selected: Boolean = false,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    currencyFormat: NumberFormat = remember { idrCurrencyFormat() }
 ) {
     val semantic = LocalSemanticColors.current
-    // Formatter Rupiah dari SATU sumber kebenaran (audit screens/ 2026-08-14).
-    val currencyFormat = remember { idrCurrencyFormat() }
 
     val categoryIcon = getCategoryIcon(category)
     val percentText = (percentage * 100).toInt()
@@ -323,14 +380,15 @@ fun CategoryProgressRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Constants.Ui.CORNER_M.dp))
             // Tap baris mem-filter riwayat per kategori (item 3); highlight saat aktif.
-            // selectable + Role.Button supaya TalkBack mengumumkan "Terpilih/Tidak
-            // terpilih" dan tahu barisnya bisa di-tap.
+            // B26: Role.Tab (bukan Role.Button) — ini adalah pemilih filter,
+            // sejajar dengan segmented tab di header riwayat. TalkBack tetap
+            // mengumumkan "Terpilih/Tidak terpilih".
             .background(
                 if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
                 else Color.Transparent
             )
             .then(
-                if (onClick != null) Modifier.selectable(selected = selected, role = Role.Button, onClick = onClick)
+                if (onClick != null) Modifier.selectable(selected = selected, role = Role.Tab, onClick = onClick)
                 else Modifier
             )
             .padding(vertical = 4.dp, horizontal = if (onClick != null) 6.dp else 0.dp)
@@ -363,17 +421,26 @@ fun CategoryProgressRow(
                     text = category,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    // B-M7: nama kategori panjang tidak boleh menimpa badge
+                    // nominal/% di kanan — dipangkas dengan elipsis.
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(horizontalAlignment = Alignment.End) {
+                Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f)) {
+                    // M8: nominal panjang dipotong elipsis, tidak menimpa badge %.
                     Text(
                         text = currencyFormat.format(amount),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 150.dp)
                     )
                     // Tren MoM (item 4): hanya muncul saat bulan terpilih.
                     // Pengeluaran naik = merah (buruk), turun = hijau (baik).
@@ -434,6 +501,37 @@ private fun trendPercentLabel(delta: Double, amount: Double, newLabel: String): 
     return if (delta > 0) "+$pct%" else "$pct%"
 }
 
+/** M2/L11: label agregat untuk potongan di luar Top-7 / slice kecil. */
+private const val LAINNYA_LABEL = "Lainnya"
+private const val MAX_DONUT_SLICES = 7
+private const val MIN_SLICE_DEG = 0.5f
+
+/**
+ * Batasi donut & legend ke maksimal [MAX_DONUT_SLICES] potongan. Kategori di
+ * luar Top-7 DAN slice yang terlalu kecil (<0.5°) dilipat menjadi satu "Lainnya"
+ * supaya warna tidak berulang (palette 7 warna) dan tidak ada entri legend tanpa
+ * potongan donut (L11).
+ */
+private fun donutSlices(
+    all: List<Pair<String, Double>>,
+    total: Double
+): List<Pair<String, Double>> {
+    if (all.isEmpty() || total <= 0) return all
+    val minAmount = total * (MIN_SLICE_DEG / 360f)
+    val head = all.filter { it.second >= minAmount }.take(MAX_DONUT_SLICES)
+    if (head.isEmpty()) return listOf(LAINNYA_LABEL to total)
+    val foldedAmount = all.filterNot { it in head }.sumOf { it.second }
+    if (foldedAmount <= 0) return head
+    return if (foldedAmount >= minAmount) {
+        head + (LAINNYA_LABEL to foldedAmount)
+    } else {
+        // Sisa terlalu kecil untuk digambar → gabung ke slice terakhir yang
+        // sudah terlihat (tidak ada legend "hampa").
+        val last = head.last()
+        head.dropLast(1) + (last.first to (last.second + foldedAmount))
+    }
+}
+
 /** Bagian breakdown kategori (analitik visual Rekap): donut chart + baris progres
  *  per kategori dengan tren MoM. Diekstrak dari RekapScreen (TASK-1.2.1) — aksi
  *  filter kategori di-hoist ke layar via [onCategoryClick]. */
@@ -444,8 +542,13 @@ internal fun RekapCategoryBreakdown(
     colors: List<Color>,
     trendByCategory: Map<String, Double>?,
     selectedCategory: String?,
-    onCategoryClick: (String) -> Unit
+    onCategoryClick: (String) -> Unit,
+    currencyFormat: NumberFormat = remember { idrCurrencyFormat() }
 ) {
+    // M2 + L11: satu daftar `slices` dipakai donut DAN legend → selalu konsisten.
+    val slices = remember(categoryTotals, totalExpense) {
+        donutSlices(categoryTotals, totalExpense)
+    }
     Column {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -473,14 +576,16 @@ internal fun RekapCategoryBreakdown(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 DonutChart(
-                    categoryTotals = categoryTotals,
+                    categoryTotals = slices,
                     totalExpense = totalExpense,
-                    colors = colors
+                    colors = colors,
+                    currencyFormat = currencyFormat
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                categoryTotals.forEachIndexed { index, (category, amount) ->
+                slices.forEachIndexed { index, (category, amount) ->
+                    val isOther = category == LAINNYA_LABEL
                     val percentage = if (totalExpense > 0) (amount / totalExpense).toFloat() else 0f
                     val accentColor = colors[index % colors.size]
 
@@ -489,11 +594,13 @@ internal fun RekapCategoryBreakdown(
                         amount = amount,
                         percentage = percentage,
                         accentColor = accentColor,
-                        trendDelta = trendByCategory?.let { amount - (it[category] ?: 0.0) },
-                        selected = selectedCategory == category,
-                        onClick = { onCategoryClick(category) }
+                        // "Lainnya" bukan kategori nyata → tidak bisa di-filter.
+                        trendDelta = if (isOther) null else trendByCategory?.let { amount - (it[category] ?: 0.0) },
+                        selected = !isOther && selectedCategory == category,
+                        onClick = if (isOther) null else ({ onCategoryClick(category) }),
+                        currencyFormat = currencyFormat
                     )
-                    if (index < categoryTotals.size - 1) {
+                    if (index < slices.lastIndex) {
                         Spacer(modifier = Modifier.height(14.dp))
                     }
                 }
@@ -507,12 +614,10 @@ fun DonutChart(
     categoryTotals: List<Pair<String, Double>>,
     totalExpense: Double,
     colors: List<Color>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    currencyFormat: NumberFormat = remember { idrCurrencyFormat() }
 ) {
     if (totalExpense <= 0 || categoryTotals.isEmpty()) return
-
-    // Formatter Rupiah dari SATU sumber kebenaran (audit screens/ 2026-08-14).
-    val currencyFormat = remember { idrCurrencyFormat() }
 
     // P2-18: ringkasan aksesibel — pembaca layar membacakan proporsi kategori
     // daripada "grafik tanpa deskripsi". Teks lewat strings.xml (audit res/ 2026-08-14)
@@ -526,27 +631,37 @@ fun DonutChart(
     // Resolve di context composable (blok semantics bukan composable context).
     val chartSummaryDesc = stringResource(R.string.donut_chart_summary, chartSummary)
 
+    // C16: ukuran donut mengikuti fontScale (dibatasi) supaya label tengah tidak
+    // menimpa cincin saat aksesibilitas font besar.
+    val chartScale = LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
+    // B-M9: 160f * 1.5 = 240dp meluap di layar 320dp. Batasi dengan ruang
+    // aktual: LazyColumn 16dp*2 + Card 18dp*2 + Box 16dp*2 = 100dp padding,
+    // dikurangi padding Box 16dp*2 → availableWidthDp - 32f.
+    val availableWidthDp = LocalConfiguration.current.screenWidthDp - 100f
+    val donutSize = min(160f * chartScale, availableWidthDp - 32f).dp
+    val donutStroke = (24f * chartScale).dp
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(16.dp)
-            .semantics {
-                contentDescription = chartSummaryDesc
-            },
+            // B24: ringkasan dibacakan sekali — Canvas + teks tengah tidak ikut
+            // mengumumkan ("Total ...", "Pengeluaran ...", nominal) secara terpisah.
+            .clearAndSetSemantics { contentDescription = chartSummaryDesc },
         contentAlignment = Alignment.Center
     ) {
-        androidx.compose.foundation.Canvas(modifier = Modifier.size(160.dp)) {
+        androidx.compose.foundation.Canvas(modifier = Modifier.size(donutSize)) {
             var startAngle = -90f
-            val strokeWidth = 24.dp.toPx()
+            val strokeWidth = donutStroke.toPx()
             // Gap tetap 2° tapi DIPOTONG di slice kecil: `sweepAngle - gap` tidak
             // boleh negatif (drawArc dengan sweep negatif melukis ke arah salah).
             val gap = 2f
 
             categoryTotals.forEachIndexed { index, (_, amount) ->
                 val sweepAngle = ((amount / totalExpense) * 360).toFloat()
-                // Skip slice yang hampir tak terlihat (<0.5°) — tapi tetap majukan
-                // startAngle sebesar angle aslinya supaya posisi slice berikutnya
-                // tetap akurat (bug sebelumnya: startAngle tidak maju saat skip).
+                // Normalnya tidak ada slice <0.5° (sudah dilipat jadi "Lainnya"
+                // oleh donutSlices). Guard ini tetap ada untuk pemanggil langsung
+                // dan tetap majukan startAngle supaya slice berikutnya akurat.
                 if (sweepAngle >= 0.5f) {
                     val drawnSweep = (sweepAngle - gap).coerceAtLeast(0.5f)
                     drawArc(
@@ -586,9 +701,11 @@ fun DonutChart(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 118.dp)
+                // B-M9: label tengah dibatasi diameter dikurangi dua ketebalan
+                // cincin + jarak, supaya tidak menimpa ring saat donut mengecil.
+                modifier = Modifier.widthIn(max = donutSize - donutStroke * 2f - 8.dp)
             )
         }
     }

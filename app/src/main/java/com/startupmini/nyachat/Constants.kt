@@ -106,6 +106,10 @@ object Constants {
     // dijaga ConstantsTest.
     object Fields {
         const val OWNER_ID = "ownerId"
+        // M12: token hasil callable `reservePin` — WAJIB ikut di payload create
+        // dokumen keluarga supaya server/rules bisa memverifikasi reservasi PIN
+        // (anti PIN squatting & "1 akun = 1 workspace" bypass dari klien).
+        const val CLAIM_TOKEN = "claimToken"
         const val CREATED_AT = "createdAt"
         const val UID = "uid"
         const val EMAIL = "email"
@@ -145,6 +149,9 @@ object Constants {
         const val AMOUNT = "amount"
         const val DESCRIPTION = "description"
         const val LOGGED_BY = "loggedBy"
+        // Audit M3: penulis transaksi (uid Firestore) — rules memakainya untuk
+        // mengizinkan non-owner mengubah/menghapus transaksinya sendiri.
+        const val AUTHOR_UID = "authorUid"
         const val CHAT_MESSAGE_ID = "chatMessageId"
         const val FCM_TOKEN = "fcmToken"
         // r1.2.3 (P1): avatar foto member — bytes JPEG kecil (Blob Firestore) +
@@ -269,9 +276,19 @@ object Constants {
     object Defaults {
         const val ROLE = Roles.MEMBER
         const val LABEL = "Anggota"
-        /** Panjang PIN untuk workspace BARU (8 digit = ruang kunci 10^8). */
+        /**
+         * Panjang PIN workspace BARU: 8 digit → ruang kunci penuh 10^8
+         * (100 juta kombinasi). SEMUA digit dibangkitkan SecureRandom 0–9 —
+         * tidak ada pembatasan digit pertama 1–9 (L6).
+         */
         const val PIN_LENGTH = 8
-        /** Panjang minimal PIN yang diterima saat join (kompatibilitas PIN 6 digit lama). */
+        /** Panjang minimal PIN yang diterima saat join (workspace baru wajib 8 digit). */
+        const val PIN_MIN_LENGTH = 8
+        /**
+         * Panjang PIN 6 digit lama — dipertahankan hanya untuk kompatibilitas
+         * data/tes lama, BUKAN untuk validasi join workspace baru.
+         */
+        @Deprecated("Gunakan PIN_MIN_LENGTH — workspace baru wajib 8 digit.")
         const val PIN_MIN_LEGACY_LENGTH = 6
         /** Nama default workspace bila doc keluarga belum punya field `name`. */
         const val FAMILY_NAME = "Keuangan Bersama"
@@ -286,7 +303,11 @@ object Constants {
 
     // ===== Skala radius sudut (audit P2.6 — hindari radius ad-hoc) =====
     object Ui {
-        /** dp, elemen kecil (chip, segmen kontrol, icon container). */
+        /**
+         * dp, elemen kecil (chip, segmen kontrol, icon container).
+         * B-L: dipakai juga untuk radius badge finansial di `RekapCharts.kt`
+         * (sebelumnya literal `8.dp` — konsumen tinggal adopt konstanta ini).
+         */
         const val CORNER_S = 8
         /** dp, tombol & field. */
         const val CORNER_M = 12

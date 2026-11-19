@@ -46,19 +46,24 @@ service cloud.firestore {
     //     Trade-off: keberadaan PIN tetap bisa diketahui lewat hasil joinRequest,
     //     tapi TANPA membocorkan identitas pemilik.
     //   - CREATE hanya boleh oleh pemohon yang menulis ownerId-nya sendiri
-    //     (mencegah merebut/menimpa dokumen keluarga orang lain). Trade-off yang
-    //     disengaja: pengguna Google yang login bisa "mendaftarkan" PIN (squatting)
-    //     sebelum pemilik asli membuatnya. Risikonya kecil karena PIN 8 digit
-    //     di-generate app tepat sebelum dibagikan, jadi jendela squatt-nya sempit.
+    //     (mencegah merebut/menimpa dokumen keluarga orang lain). AUDIT M12/M7:
+    //     PIN squatting LANGSUNG dari klien kini DITUTUP — create wajib menyertakan
+    //     `claimToken` yang diterbitkan Cloud Function `reservePin` lewat dokumen
+    //     pinClaims/{familyId} (uid + token cocok, belum kedaluwarsa).
     match /families/{familyId} {
       allow read: if signedInGoogle() && (isMember(familyId) || isOwner(familyId));
       allow create: if signedInGoogle()
-        && request.resource.data.ownerId == request.auth.uid;
-      // r1.6.0: update doc keluarga dibatasi HANYA field 'name' (rename workspace)
-      // & 'plan' (langganan) oleh owner — mengikuti pola audit (owner tidak lagi
-      // bisa menulis field sembarang).
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.claimToken is string
+        && exists(/databases/$(database)/documents/pinClaims/$(familyId))
+        && get(/databases/$(database)/documents/pinClaims/$(familyId)).data.uid == request.auth.uid
+        && get(/databases/$(database)/documents/pinClaims/$(familyId)).data.token == request.resource.data.claimToken
+        && get(/databases/$(database)/documents/pinClaims/$(familyId)).data.expiresAt > request.time;
+      // AUDIT H3: update doc keluarga dibatasi HANYA field 'name' (rename workspace).
+      // 'plan' adalah SERVER-AUTHORITATIVE — hanya diubah lewat callable
+      // `setWorkspacePlan`, bukan lewat write klien langsung ke dokumen ini.
       allow update: if signedInGoogle() && isOwner(familyId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'plan']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']);
       allow delete: if signedInGoogle() && isOwner(familyId);
     }
 
@@ -68,7 +73,10 @@ service cloud.firestore {
     // dokumen member-nya sendiri (bootstrap & migrasi workspace lama).
     match /families/{familyId}/members/{uid} {
       allow read: if signedInGoogle() && (isMember(familyId) || request.auth.uid == uid);
+      // L9 (audit): dokumen member WAJIB membawa field `uid` yang sama dengan id
+      // dokumen — mencegah doc member "mentok" di path uid A tapi berisi uid B.
       allow create: if signedInGoogle()
+        && request.resource.data.uid == uid
         && (isOwner(familyId)
             || (request.auth.uid == uid
                 && get(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid));
@@ -141,6 +149,23 @@ service cloud.firestore {
       allow read: if signedInGoogle() && resource.data.uid == request.auth.uid;
     }
 
+    // AUDIT M5/L7: counter global percobaan PIN (dikelola Cloud Function
+    // `registerPinAttempt`). Klien HANYA boleh membaca counter miliknya sendiri;
+    // write/hapus ditolak — kalau klien bisa menghapus/reset counter, create
+    // joinRequest bisa bypass cooldown dengan delete + recreate.
+    match /pinAttempts/{uid} {
+      allow read: if signedInGoogle() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // AUDIT M12/M7: reservasi PIN (dikelola Cloud Function `reservePin`).
+    // Klien hanya boleh membaca klaim miliknya sendiri; write ditolak supaya
+    // tidak bisa membuat/memperpanjang claimToken palsu untuk squatting PIN.
+    match /pinClaims/{claimId} {
+      allow read: if signedInGoogle() && resource.data.uid == request.auth.uid;
+      allow write: if false;
+    }
+
     // Permintaan bergabung: pemohon boleh membuat/mengubah/mencabut permintaan
     // miliknya sendiri; owner boleh melihat semua & menindaklanjuti (setujui/tolak),
     // termasuk menghapus permintaan. Guard tambahan:
@@ -154,7 +179,11 @@ service cloud.firestore {
     //   - request ulang (update) oleh pemohon sendiri dibatasi minimal 5 menit
     //     sejak permintaan sebelumnya (dibandingkan via resource.data.requestedAt);
     //     owner tidak dibatasi. Ini melengkapi PinAttemptLimiter sisi klien
-    //     (yang hanyabisa di-bypass di sisi server).
+    //     (yang hanya bisa di-bypass di sisi server).
+    // AUDIT M5/L7: CREATE juga dijaga counter GLOBAL pinAttempts/{uid} (milik
+    // pemohon) — maks 9 percobaan & jeda >= 5 menit sejak percobaan terakhir.
+    // Counter dikelola Cloud Function `registerPinAttempt`; klien tidak bisa
+    // menghapusnya, jadi delete + recreate joinRequest tidak mengulang cooldown.
     match /families/{familyId}/joinRequests/{uid} {
       allow create: if signedInGoogle()
         && request.auth.uid == uid
@@ -164,7 +193,13 @@ service cloud.firestore {
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.requestedAt is number
         && request.resource.data.requestedAt <= request.time.toMillis()
-        && request.resource.data.requestedAt >= request.time.toMillis() - 90000000;
+        && request.resource.data.requestedAt >= request.time.toMillis() - 90000000
+        && exists(/databases/$(database)/documents/pinAttempts/$(request.auth.uid))
+        && get(/databases/$(database)/documents/pinAttempts/$(request.auth.uid)).data.count <= 8;
+        // Cooldown 5 menit sengaja TIDAK dicek di sini: callable
+        // registerPinAttempt dipanggil tepat sebelum create ini, sehingga
+        // lastAttemptAt selalu ≈ request.time. Cooldown ditegakkan penuh di
+        // callable (resource-exhausted), rules hanya membatasi jumlah total.
       allow update: if signedInGoogle()
         && (isOwner(familyId)
             || (request.auth.uid == uid
@@ -228,6 +263,10 @@ service cloud.firestore {
             || request.resource.data.senderUid == request.auth.uid)
         && (!('imageUrl' in request.resource.data)
             || request.resource.data.imageUrl is string);
+      // AUDIT M3: update diikat ke PENULIS ASLI (senderUid di dokumen lama)
+      // atau owner. Hanya field yang memang diedit klien yang boleh berubah,
+      // dalam jendela 24 jam sejak `timestamp` pesan. `timestamp.value()`
+      // dipakai karena `timestamp` di dokumen adalah angka epoch millis.
       allow update: if signedInGoogle() && isMember(familyId)
         && request.resource.data.cloudId == docId
         && request.resource.data.sender is string
@@ -237,8 +276,19 @@ service cloud.firestore {
         && (!('senderUid' in request.resource.data)
             || request.resource.data.senderUid == request.auth.uid)
         && (!('imageUrl' in request.resource.data)
-            || request.resource.data.imageUrl is string);
-      allow delete: if signedInGoogle() && isMember(familyId);
+            || request.resource.data.imageUrl is string)
+        && (('senderUid' in resource.data && resource.data.senderUid == request.auth.uid)
+            || isOwner(familyId))
+        && request.time - timestamp.value(int(resource.data.timestamp / 1000)) < duration.value(24, 'h')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'messageText', 'editedAt', 'isFinancial', 'detectedAmount',
+             'detectedCategory', 'detectedType', 'detectedCount', 'hasMixedTypes',
+             'enc', 'msgVersion', 'imageUrl', 'replyToSender', 'replyToText',
+             'detectedBy', 'serverUpdatedAt', 'senderUid']);
+      // AUDIT M3: hapus hanya penulis asli (senderUid) atau owner.
+      allow delete: if signedInGoogle() && isMember(familyId)
+        && (('senderUid' in resource.data && resource.data.senderUid == request.auth.uid)
+            || isOwner(familyId));
     }
 
     // r1.7.0 (E2EE) — ACK "sudah diterima" untuk chat ephemeral:
@@ -252,30 +302,57 @@ service cloud.firestore {
       allow create, update: if signedInGoogle() && isMember(familyId)
         && request.auth.uid == uid
         && request.resource.data.deliveredAt is timestamp;
-      allow delete: if signedInGoogle() && request.auth.uid == uid;
+      // L11 (audit): hapus ACK juga harus masih jadi anggota workspace.
+      allow delete: if signedInGoogle() && isMember(familyId) && request.auth.uid == uid;
     }
 
     // r1.7.0 (E2EE) — marker aktivasi: `families/{familyId}/e2ee/e2ee`.
-    // CREATE pertama yang menang (device OWNER membuatnya saat migrasi);
-    // anggota tidak bisa mengubah/menghapus marker.
-    match /families/{familyId}/e2ee/{markerDoc} {
+    // AUDIT M2/C6: path dikunci LITERAL 'e2ee' (bukan wildcard), CREATE hanya
+    // OWNER dengan `activated == request.time` (server timestamp) dan `keyEpoch`
+    // (opsional) bertipe int >= 0. Anggota tidak bisa mengubah/menghapus marker.
+    match /families/{familyId}/e2ee/e2ee {
       allow read: if signedInGoogle() && isMember(familyId);
-      allow create: if signedInGoogle() && isMember(familyId)
-        && request.resource.data.activated is timestamp;
-      allow update, delete: if false;
+      allow create: if signedInGoogle() && isOwner(familyId)
+        && request.resource.data.activated == request.time
+        && (!('keyEpoch' in request.resource.data)
+            || (request.resource.data.keyEpoch is int && request.resource.data.keyEpoch >= 0));
+      // AUDIT H2: owner boleh menaikkan keyEpoch SAAT rotasi grup key setelah
+      // anggota dikeluarkan. Field lain (activated/ownerUid) tetap immutable.
+      allow update: if signedInGoogle() && isOwner(familyId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['keyEpoch'])
+        && request.resource.data.keyEpoch is int
+        && request.resource.data.keyEpoch >= 0
+        && (!('keyEpoch' in resource.data)
+            || request.resource.data.keyEpoch > resource.data.keyEpoch);
+      allow delete: if false;
+    }
+    // AUDIT M2/C6: path lain di bawah /e2ee tidak ada yang sah — baca anggota
+    // saja, semua write ditolak (mencegah marker tambahan bikin split-brain).
+    match /families/{familyId}/e2ee/{other} {
+      allow read: if signedInGoogle() && isMember(familyId);
+      allow write: if false;
     }
 
     // r1.7.0 (E2EE) — grup key yang di-wrap per perangkat:
     // `families/{familyId}/e2eeKeys/{uid}` berisi `e2eeKeyBytes` (EciesWrap).
-    // Ditulis oleh anggota mana pun yang memegang grup key (self-heal) untuk
-    // member {uid}; hanya dibatasi tipenya (server tidak bisa memvalidasi kripto).
+    // AUDIT H1: write diikat ke penulis (uid == request.auth.uid) atau owner,
+    // beserta e2eeKeyVersion non-negatif yang MONOTONIS (naik/tetap). Pembatasan
+    // sisi klien saja TIDAK cukup — klien nakal bisa menimpa wrap perangkat lain.
     match /families/{familyId}/e2eeKeys/{uid} {
       allow read: if signedInGoogle() && isMember(familyId);
       allow create, update: if signedInGoogle() && isMember(familyId)
+        && (uid == request.auth.uid || isOwner(familyId))
         && request.resource.data.e2eeKeyBytes is string
         && request.resource.data.e2eeKeyBytes.size() > 0
-        && request.resource.data.e2eeKeyBytes.size() <= 5000;
-      allow delete: if false;
+        && request.resource.data.e2eeKeyBytes.size() <= 5000
+        && request.resource.data.e2eeKeyVersion is int
+        && request.resource.data.e2eeKeyVersion >= 0
+        && (resource == null
+            || request.resource.data.e2eeKeyVersion >= resource.data.e2eeKeyVersion);
+      // AUDIT H1: izinkan hapus wrap usang oleh owner atau pemiliknya sendiri
+      // (self) — stale wrap perlu bisa dibersihkan saat kunci di-regenerasi.
+      allow delete: if signedInGoogle() && isMember(familyId)
+        && (uid == request.auth.uid || isOwner(familyId));
     }
 
     // r1.7.1 (tanda terima/baca) — marker ringan per pesan terenkripsi:
@@ -286,14 +363,28 @@ service cloud.firestore {
     // array bersifat grow-only (ukuran tidak boleh mengecil — anti-hapus).
     match /families/{familyId}/receipts/{cloudId} {
       allow read: if signedInGoogle() && isMember(familyId);
+      // AUDIT M4: array grow-only yang benar — elemen wajib string (uid), maks
+      // 100 elemen, tidak ada elemen lama yang dihapus/diganti (hasAll), dan
+      // tiap write hanya boleh menambah PALING BANYAK satu uid (arrayUnion).
       allow create, update: if signedInGoogle() && isMember(familyId)
         && request.resource.data.deliveredBy is list
-        && request.resource.data.readBy is list
+        && request.resource.data.deliveredBy.size() <= 100
+        && request.resource.data.deliveredBy.all(x, x is string)
         && request.auth.uid in request.resource.data.deliveredBy
         && (resource == null
-            || request.resource.data.deliveredBy.size() >= resource.data.deliveredBy.size())
-        && (resource == null
-            || request.resource.data.readBy.size() >= resource.data.readBy.size());
+            || (request.resource.data.deliveredBy.hasAll(resource.data.deliveredBy)
+                && request.resource.data.deliveredBy.size() <= resource.data.deliveredBy.size() + 1))
+        // AUDIT M11: writeAck tidak menulis readBy — field boleh ABSEN saat
+        // create/first ACK. Saat ada, tetap tervalidasi grow-only.
+        && (!('readBy' in request.resource.data) || (
+            request.resource.data.readBy is list
+            && request.resource.data.readBy.size() <= 100
+            && request.resource.data.readBy.all(x, x is string)
+            && (resource == null
+                || (!('readBy' in resource.data) || (
+                    request.resource.data.readBy.hasAll(resource.data.readBy)
+                    && request.resource.data.readBy.size() <= resource.data.readBy.size() + 1)))
+        ));
       allow delete: if false;
     }
 
@@ -324,11 +415,17 @@ service cloud.firestore {
         && request.resource.data.cloudId == docId
         && request.resource.data.timestamp is number
         && (validEncryptedTx() || validPlaintextTx());
+      // AUDIT M3: update diikat ke penulis bila dokumen membawa `authorUid`,
+      // kalau tidak ada → owner-only. Client saat ini belum menulis `authorUid`,
+      // jadi secara efektif hanya owner yang bisa mengubah transaksi lama.
       allow update: if signedInGoogle() && isMember(familyId)
         && request.resource.data.cloudId == docId
         && request.resource.data.timestamp is number
-        && (validEncryptedTx() || validPlaintextTx());
-      allow delete: if signedInGoogle() && isMember(familyId);
+        && (validEncryptedTx() || validPlaintextTx())
+        && (('authorUid' in resource.data && resource.data.authorUid == request.auth.uid)
+            || isOwner(familyId));
+      // AUDIT M3: hapus transaksi dibatasi owner (riwayat keuangan sensitif).
+      allow delete: if signedInGoogle() && isMember(familyId) && isOwner(familyId);
     }
   }
 }

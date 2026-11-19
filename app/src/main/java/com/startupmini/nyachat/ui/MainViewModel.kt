@@ -136,6 +136,39 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     // Pola sama dengan transactionRecorded (tanpa asSharedFlow — import tidak perlu).
     val deleteUndoEvents: SharedFlow<DeleteUndo> = _deleteUndoEvents
 
+    /**
+     * B3 (UX Round-2): event one-shot kegagalan operasi tulis transaksi
+     * (insert / update / delete / undo). Payload = pesan siap pakai
+     * [R.string.ux_save_failed]; UI menampilkannya lewat
+     * [com.startupmini.nyachat.ui.AppSnackbar] dengan aksi `ux_retry` yang
+     * memanggil [retryLastFailedOperation]. Memakai SharedFlow (bukan StateFlow)
+     * supaya dua kegagalan berurutan tidak saling menimpa saat snackbar antre.
+     */
+    private val _operationFailed = MutableSharedFlow<String>(
+        extraBufferCapacity = 4,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val operationFailed: SharedFlow<String> = _operationFailed
+
+    /** B3: operasi terakhir yang gagal — dipanggil ulang dari aksi "Coba lagi". */
+    private var lastFailedOperation: (() -> Unit)? = null
+
+    /**
+     * B3: ulangi operasi transaksi terakhir yang gagal. Guard di sini mencegah
+     * retry ganda bila snackbar aksinya ditekan dua kali.
+     */
+    fun retryLastFailedOperation() {
+        val retry = lastFailedOperation ?: return
+        lastFailedOperation = null
+        retry()
+    }
+
+    /** B3: simpan closure retry lalu emit pesan ux_save_failed ke kanal feedback. */
+    private fun reportFailedOperation(retry: () -> Unit) {
+        lastFailedOperation = retry
+        _operationFailed.tryEmit(getApplication<Application>().getString(R.string.ux_save_failed))
+    }
+
     init {
         // P3-1: AI dipisah ke FinanceAiService — dependency injectable (bisa di-mock).
         repository = createRepository(application)
@@ -294,7 +327,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         category: String,
         amount: Double,
         description: String,
-        loggedBy: String
+        loggedBy: String,
+        onResult: ((Boolean) -> Unit)? = null
     ) {
         viewModelScope.launch {
             val trans = FinancialTransaction(
@@ -308,8 +342,14 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val inserted = repository.addManualTransaction(trans)
                 _transactionRecorded.tryEmit(TransactionRecorded(inserted))
+                onResult?.invoke(true)
             } catch (e: Exception) {
                 Log.w("MainViewModel", "Operasi gagal", e)
+                // B3: jangan biarkan kegagalan insert hilang diam-diam.
+                onResult?.invoke(false)
+                reportFailedOperation {
+                    addManualTransaction(type, category, amount, description, loggedBy, onResult)
+                }
             }
         }
     }
@@ -326,6 +366,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 if (emitUndo) _deleteUndoEvents.tryEmit(DeleteUndo(null, listOf(transaction)))
             } catch (e: Exception) {
                 Log.w("MainViewModel", "Operasi gagal", e)
+                // B3: hapus gagal → snackbar ux_save_failed + Coba lagi.
+                reportFailedOperation { deleteTransaction(transaction, emitUndo) }
             }
         }
     }
@@ -337,16 +379,25 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 repository.restoreDeleted(payload.message, payload.transactions)
             } catch (e: Exception) {
                 Log.w("MainViewModel", "Urungkan hapus gagal", e)
+                // B3: undo gagal juga masuk kanal yang sama dengan operasi lain.
+                reportFailedOperation { undoDelete(payload) }
             }
         }
     }
 
-    fun updateTransaction(transaction: FinancialTransaction) {
+    fun updateTransaction(
+        transaction: FinancialTransaction,
+        onResult: ((Boolean) -> Unit)? = null
+    ) {
         viewModelScope.launch {
             try {
                 repository.updateTransaction(transaction)
+                onResult?.invoke(true)
             } catch (e: Exception) {
                 Log.w("MainViewModel", "Operasi gagal", e)
+                // B3: update (edit transaksi) gagal → ux_save_failed + Coba lagi.
+                onResult?.invoke(false)
+                reportFailedOperation { updateTransaction(transaction, onResult) }
             }
         }
     }

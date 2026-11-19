@@ -13,6 +13,7 @@
          durasi custom & post-splash yang eksplisit. -->
     <style name="Theme.MyApplication" parent="Theme.MyApplication.Base">
         <item name="android:windowSplashScreenBackground">@color/splash_background</item>
-        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <!-- D-M3: pakai logo splash khusus (tanpa scale 0.5 dari foreground adaptive) -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_logo</item>
     </style>
 </resources>

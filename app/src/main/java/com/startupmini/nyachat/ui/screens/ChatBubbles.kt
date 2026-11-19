@@ -465,7 +465,6 @@ fun ChatMessageBubble(
                     // TalkBack harus tetap bisa menjangkau aksi tersebut.
                     val hasInteractiveChild = onOpenImage != null ||
                         (hasFinancialBadge && onOpenTransaction != null)
-                    if (!hasInteractiveChild) role = null
                     contentDescription = bubbleDescription
                     customActions = buildList {
                         add(CustomAccessibilityAction(openMenuActionLabel) {

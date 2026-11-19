@@ -4,7 +4,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import com.startupmini.nyachat.data.local.FinancialTransaction
 import com.startupmini.nyachat.data.remote.GitHubRelease
@@ -62,7 +61,7 @@ class MainDialogController {
          * Triple disimpan sebagai 3 String (empty = null) agar listSaver tetap
          * bertipe List<Any> (non-null).
          */
-        val Saver: Saver<MainDialogController, List<Any>> = listSaver<MainDialogController, Any>(
+        val Saver = Saver<MainDialogController, List<Any>>(
             save = { c ->
                 listOf<Any>(
                     c.showAddDialog,

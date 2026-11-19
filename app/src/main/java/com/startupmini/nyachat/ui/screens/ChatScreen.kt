@@ -818,7 +818,7 @@ fun ChatScreen(
                     modifier = Modifier
                         .size(40.dp)
                         // Audit UX M1: visual 40dp, area sentuh ≥48dp.
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .clip(CircleShape)
                         .background(fabFill, CircleShape)
                         // clickable SEBELUM border (reviewer 2026-08-12): ripple

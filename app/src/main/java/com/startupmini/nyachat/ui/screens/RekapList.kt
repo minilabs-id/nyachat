@@ -160,7 +160,7 @@ internal fun RekapMonthNav(
                     contentPadding = PaddingValues(horizontal = 8.dp),
                     // B28: target sentuh minimal 48dp.
                     modifier = Modifier
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .testTag("rekap_month_all_button")
                 ) {
                     Text(stringResource(R.string.rekap_month_all))
@@ -628,7 +628,6 @@ fun TransactionItemCard(
                         // L10: keterangan terpotong bisa dibuka dengan tap.
                         var descriptionExpanded by remember { mutableStateOf(false) }
                         // stringResource tidak bisa dipanggil di dalam lambda semantics.
-                        val expandLabel = stringResource(R.string.ux_expand_description)
                         val expandedLabel = stringResource(R.string.ux_desc_expanded)
                         val collapsedLabel = stringResource(R.string.ux_desc_collapsed)
                         Text(
@@ -644,7 +643,6 @@ fun TransactionItemCard(
                                 // B15: TalkBack mengumumkan aksi & keadaan expand,
                                 // bukan hanya membaca teks keterangannya.
                                 .semantics {
-                                    onClickLabel = expandLabel
                                     stateDescription = if (descriptionExpanded) expandedLabel else collapsedLabel
                                 }
                         )

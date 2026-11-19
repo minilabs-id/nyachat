@@ -199,7 +199,7 @@ fun QuickSuggestionRow(
                     // sentuhnya ≥48dp — klik dipasang di wrapper Box.
                     Box(
                         modifier = Modifier
-                            .minimumInteractiveComponentSize()
+                            .heightIn(min = 48.dp).widthIn(min = 48.dp)
                             .clickable { onSuggestionClicked(text) },
                         contentAlignment = Alignment.Center
                     ) {
@@ -290,7 +290,7 @@ private fun ReplyQuoteRow(
         // Audit UX M1: ikon tetap 18dp/36dp secara visual, area sentuh ≥48dp.
         IconButton(
             onClick = onDismiss,
-            modifier = Modifier.size(36.dp).minimumInteractiveComponentSize()
+            modifier = Modifier.size(36.dp).heightIn(min = 48.dp).widthIn(min = 48.dp)
         ) {
             Icon(
                 imageVector = Icons.Rounded.Close,
@@ -347,7 +347,7 @@ fun ChatFilePreviewBar(
                 // Audit UX M1: area sentuh ≥48dp tanpa mengubah visual tombol.
                 IconButton(
                     onClick = onRemove,
-                    modifier = Modifier.size(40.dp).minimumInteractiveComponentSize()
+                    modifier = Modifier.size(40.dp).heightIn(min = 48.dp).widthIn(min = 48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
@@ -415,7 +415,7 @@ fun ChatImagePreviewBar(
                 // Audit UX M1: area sentuh ≥48dp tanpa mengubah visual tombol.
                 IconButton(
                     onClick = onRemove,
-                    modifier = Modifier.size(40.dp).minimumInteractiveComponentSize()
+                    modifier = Modifier.size(40.dp).heightIn(min = 48.dp).widthIn(min = 48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
@@ -599,7 +599,7 @@ fun ChatInputBar(
                     modifier = Modifier
                         .size(40.dp)
                         // Audit UX M1: visual 40dp, area sentuh ≥48dp.
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .testTag("ask_ai_button")
                 ) {
                     Icon(

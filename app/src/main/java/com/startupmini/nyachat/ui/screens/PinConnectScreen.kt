@@ -495,7 +495,6 @@ fun PinConnectScreen(
                                             .fillMaxWidth()
                                             .padding(vertical = 12.dp)
                                             .focusRequester(generatedPinFocusRequester)
-                                            .focusable(true)
                                     )
                                     Text(
                                         text = stringResource(R.string.pin_share_hint),

@@ -329,7 +329,7 @@ fun AddTransactionDialog(
                     ),
                     modifier = Modifier
                         .weight(1f)
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .testTag("add_dialog_expense_chip")
                 )
 
@@ -350,7 +350,7 @@ fun AddTransactionDialog(
                     ),
                     modifier = Modifier
                         .weight(1f)
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .testTag("add_dialog_income_chip")
                 )
             }
@@ -479,7 +479,7 @@ fun AddTransactionDialog(
                         onClick = { showDatePicker = true },
                         contentPadding = PaddingValues(horizontal = 8.dp),
                         // B28: target sentuh minimal 48dp.
-                        modifier = Modifier.minimumInteractiveComponentSize()
+                        modifier = Modifier.heightIn(min = 48.dp).widthIn(min = 48.dp)
                     ) {
                         Text(stringResource(R.string.ux_pick_date))
                     }
@@ -531,7 +531,7 @@ fun AddTransactionDialog(
                     enabled = !isSaving,
                     modifier = Modifier
                         .weight(1f)
-                        .minimumInteractiveComponentSize(),
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp),
                     shape = RoundedCornerShape(Constants.Ui.CORNER_M.dp)
                 ) {
                     Text(stringResource(R.string.add_cancel))
@@ -592,7 +592,7 @@ fun AddTransactionDialog(
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     modifier = Modifier
                         .weight(1f)
-                        .minimumInteractiveComponentSize()
+                        .heightIn(min = 48.dp).widthIn(min = 48.dp)
                         .testTag("add_dialog_save_button"),
                     shape = RoundedCornerShape(Constants.Ui.CORNER_M.dp)
                 ) {

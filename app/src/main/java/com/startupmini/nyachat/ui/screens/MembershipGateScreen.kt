@@ -240,7 +240,6 @@ fun MembershipGateScreen(
         modifier = Modifier
             .fillMaxSize()
             .imePadding()
-            .semantics { isDialog = true }
     ) {
         // F2 (audit focus order): gate dulu tidak punya background → layar login di
         // belakangnya masih TERLIHAT & bisa di-tap saat menunggu persetujuan owner

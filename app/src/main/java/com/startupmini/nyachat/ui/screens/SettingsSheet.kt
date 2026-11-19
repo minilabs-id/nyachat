@@ -68,7 +68,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -639,9 +638,6 @@ private fun SettingRow(
                     Modifier.clickable(onClick = onClick)
                 } else Modifier
             )
-            // C14: baris backup/restore saat busy tetap dibacakan TalkBack
-            // sebagai "dinonaktifkan" (bukan sekadar tidak merespons klik).
-            .then(if (onClick != null) Modifier.semantics { disabled = !enabled } else Modifier)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -466,7 +465,7 @@ fun ChatMessageBubble(
                     // TalkBack harus tetap bisa menjangkau aksi tersebut.
                     val hasInteractiveChild = onOpenImage != null ||
                         (hasFinancialBadge && onOpenTransaction != null)
-                    if (!hasInteractiveChild) role = Role.None
+                    if (!hasInteractiveChild) role = null
                     contentDescription = bubbleDescription
                     customActions = buildList {
                         add(CustomAccessibilityAction(openMenuActionLabel) {
@@ -1203,6 +1202,8 @@ private fun MessageStatusIndicators(
     val d = delivery ?: return
     // Audit R2-C6: token semantik mode-aware (bukan literal hardcode).
     val semantic = LocalSemanticColors.current
+    // stringResource tidak bisa dipanggil di dalam lambda semantics.
+    val resendPendingLabel = stringResource(R.string.ux_resend_pending)
     // Audit UX H2: sinkron gagal → indikator peringatan + label "Gagal terkirim"
     // (menu "Kirim ulang" tersedia di overflow bubble).
     if (d == DeliveryStatus.FAILED) {
@@ -1231,7 +1232,7 @@ private fun MessageStatusIndicators(
             strokeWidth = 2.dp,
             modifier = modifier
                 .size(StatusIconSize)
-                .semantics { contentDescription = stringResource(R.string.ux_resend_pending) }
+                .semantics { contentDescription = resendPendingLabel }
         )
         return
     }

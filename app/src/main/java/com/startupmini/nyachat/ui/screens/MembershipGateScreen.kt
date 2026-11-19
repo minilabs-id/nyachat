@@ -42,7 +42,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.isDialog
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -267,6 +266,8 @@ fun MembershipGateScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(28.dp)
         ) {
+            // stringResource tidak bisa dipanggil di dalam lambda semantics.
+            val checkingLabel = stringResource(R.string.ux_status_checking)
             when (state) {
                 GateState.CHECKING -> {
                     // B14: indikator butuh label untuk pembaca layar.
@@ -274,8 +275,8 @@ fun MembershipGateScreen(
                         modifier = Modifier
                             .size(44.dp)
                             .semantics {
-                                contentDescription = stringResource(R.string.ux_status_checking)
-                                stateDescription = stringResource(R.string.ux_status_checking)
+                                contentDescription = checkingLabel
+                                stateDescription = checkingLabel
                             }
                     )
                     Spacer(modifier = Modifier.height(20.dp))

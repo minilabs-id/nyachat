@@ -18,7 +18,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.Tooltip
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -113,47 +112,27 @@ fun MainTopBar(
             }
         },
         actions = {
-            // L8: tooltip pada aksi ikon — label muncul saat hover/long-press.
-            // C18: isi tooltip TIDAK boleh jadi node TalkBack terpisah — label
-            // sudah dibawa IconButton lewat contentDescription. Bersihkan
-            // semantics teks tooltip agar tidak ada pengumuman dobel.
-            Tooltip(
-                text = {
-                    Text(
-                        stringResource(R.string.manage_members_title),
-                        modifier = Modifier.clearAndSetSemantics {}
-                    )
-                }
+            // L8: label dibawa IconButton lewat contentDescription (Tooltip
+            // tidak tersedia di versi Material3 yang dipakai repo).
+            IconButton(
+                onClick = onManageMembers,
+                modifier = Modifier.testTag("topbar_manage_members")
             ) {
-                IconButton(
-                    onClick = onManageMembers,
-                    modifier = Modifier.testTag("topbar_manage_members")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Group,
-                        contentDescription = stringResource(R.string.manage_members_title),
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Group,
+                    contentDescription = stringResource(R.string.manage_members_title),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
             }
-            Tooltip(
-                text = {
-                    Text(
-                        stringResource(R.string.action_settings),
-                        modifier = Modifier.clearAndSetSemantics {}
-                    )
-                }
+            IconButton(
+                onClick = onSettings,
+                modifier = Modifier.testTag("topbar_settings")
             ) {
-                IconButton(
-                    onClick = onSettings,
-                    modifier = Modifier.testTag("topbar_settings")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = stringResource(R.string.action_settings),
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Settings,
+                    contentDescription = stringResource(R.string.action_settings),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(

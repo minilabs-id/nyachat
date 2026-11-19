@@ -62,7 +62,7 @@ class MainDialogController {
          * Triple disimpan sebagai 3 String (empty = null) agar listSaver tetap
          * bertipe List<Any> (non-null).
          */
-        val Saver: Saver<MainDialogController, List<Any>> = listSaver(
+        val Saver: Saver<MainDialogController, List<Any>> = listSaver<MainDialogController, Any>(
             save = { c ->
                 listOf<Any>(
                     c.showAddDialog,

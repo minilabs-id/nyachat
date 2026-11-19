@@ -16,6 +16,7 @@ import com.startupmini.nyachat.data.remote.FirestoreSyncManager
 import com.startupmini.nyachat.data.remote.GeminiService
 import com.startupmini.nyachat.data.remote.GitHubRelease
 import com.startupmini.nyachat.data.remote.GitHubUpdateChecker
+import com.startupmini.nyachat.data.remote.UpdateCheckResult
 import com.startupmini.nyachat.data.remote.MembershipManager
 import com.startupmini.nyachat.data.remote.MembershipStatus
 import com.startupmini.nyachat.data.remote.NetworkMonitor
@@ -137,15 +138,15 @@ fun SyncLifecycleGlue(
             // R2-H4: pakai hasil terstruktur agar error/offline tidak dianggap
             // "up to date" & tidak menghabiskan cooldown 1 jam.
             when (val result = GitHubUpdateChecker.checkLatestResult()) {
-                is GitHubUpdateChecker.UpdateCheckResult.Update -> {
+                is UpdateCheckResult.Update -> {
                     appPrefs.edit().putLong(Constants.Prefs.LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
                     if (GitHubUpdateChecker.isNewer(result.release.versionName, BuildConfig.VERSION_NAME)) {
                         onUpdateAvailable(result.release)
                     }
                 }
-                GitHubUpdateChecker.UpdateCheckResult.UpToDate ->
+                UpdateCheckResult.UpToDate ->
                     appPrefs.edit().putLong(Constants.Prefs.LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
-                GitHubUpdateChecker.UpdateCheckResult.Error -> Unit // cooldown tidak dipakai
+                UpdateCheckResult.Error -> Unit // cooldown tidak dipakai
             }
         }
     }

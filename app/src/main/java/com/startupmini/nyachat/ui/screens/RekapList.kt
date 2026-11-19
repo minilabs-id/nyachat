@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -67,7 +66,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.onClickLabel
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -629,6 +627,10 @@ fun TransactionItemCard(
                     Column(modifier = Modifier.weight(1f)) {
                         // L10: keterangan terpotong bisa dibuka dengan tap.
                         var descriptionExpanded by remember { mutableStateOf(false) }
+                        // stringResource tidak bisa dipanggil di dalam lambda semantics.
+                        val expandLabel = stringResource(R.string.ux_expand_description)
+                        val expandedLabel = stringResource(R.string.ux_desc_expanded)
+                        val collapsedLabel = stringResource(R.string.ux_desc_collapsed)
                         Text(
                             text = transaction.description,
                             style = MaterialTheme.typography.titleSmall,
@@ -642,11 +644,8 @@ fun TransactionItemCard(
                                 // B15: TalkBack mengumumkan aksi & keadaan expand,
                                 // bukan hanya membaca teks keterangannya.
                                 .semantics {
-                                    onClickLabel = stringResource(R.string.ux_expand_description)
-                                    stateDescription = stringResource(
-                                        if (descriptionExpanded) R.string.ux_desc_expanded
-                                        else R.string.ux_desc_collapsed
-                                    )
+                                    onClickLabel = expandLabel
+                                    stateDescription = if (descriptionExpanded) expandedLabel else collapsedLabel
                                 }
                         )
                         Spacer(modifier = Modifier.height(2.dp))

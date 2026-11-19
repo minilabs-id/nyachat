@@ -96,15 +96,15 @@ fun BackupProgressDialog(
             }
         },
         text = {
+            // stringResource tidak bisa dipanggil di dalam lambda semantics.
+            val checkingLabel = stringResource(R.string.ux_status_checking)
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(
                         // B14: status spinner dibacakan TalkBack.
                         modifier = Modifier
                             .size(30.dp)
-                            .semantics {
-                                stateDescription = stringResource(R.string.ux_status_checking)
-                            },
+                            .semantics { stateDescription = checkingLabel },
                         strokeWidth = 3.dp
                     )
                     Spacer(modifier = Modifier.width(16.dp))

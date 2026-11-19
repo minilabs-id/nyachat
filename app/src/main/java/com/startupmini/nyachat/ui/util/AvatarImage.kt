@@ -19,7 +19,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -97,13 +96,7 @@ fun AvatarImage(
     Box(
         modifier = modifier
             .size(size.dp)
-            .clip(CircleShape)
-            // B25: avatar adalah satuan visual (foto ATAU inisial) — jangan
-            // biarkan TalkBack membaca huruf tunggal inisial sebagai node
-            // terpisah di MainTopBar/SettingsSheet/ManageMembers/ProfileAccount.
-            // Label kontekstual sudah dibawa baris induk yang bisa di-tap.
-            // Caller yang sudah clear semantics tidak terpengaruh (idempoten).
-            .clearAndSetSemantics {},
+            .clip(CircleShape),
         contentAlignment = Alignment.Center
     ) {
         val bmp = photo

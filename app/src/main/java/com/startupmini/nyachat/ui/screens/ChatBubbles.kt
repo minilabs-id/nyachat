@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -814,11 +815,13 @@ private fun FinancialBadge(
     // Badge bisa di-tap untuk membuka transaksi di Rekap — inner clickable
     // menang atas combinedClickable bubble. Label aksesibilitas di-hoist.
     val badgeDesc = stringResource(R.string.chat_open_transaction_desc)
-    // A-M1: modifier area-sentuh minimum DIHAPUS — di jalur footer ia memaksa
-    // wrapper ≥48dp sehingga footer membengkak & baseline jam melayang. Badge
-    // sudah punya clickable + semantics di bawah, jadi tetap dapat diketuk.
+    // Area sentuh badge ≥48dp (API minimumInteractiveComponentSize tidak ada
+    // di versi Compose ini → pakai heightIn/widthIn) agar tap & TalkBack
+    // tetap bisa menjangkau badge kecil (termasuk uji gesture tap).
     val badgeClickModifier = if (onOpenTransaction != null) {
         Modifier
+            .heightIn(min = 48.dp)
+            .widthIn(min = 48.dp)
             .clickable(onClick = onOpenTransaction)
             .semantics {
                 contentDescription = badgeDesc
